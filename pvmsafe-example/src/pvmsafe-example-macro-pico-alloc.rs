@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "abi-gen"), no_main, no_std)]
+#![feature(stmt_expr_attributes)]
 
 use pallet_revive_uapi::{HostFnImpl as api, StorageFlags};
 use ruint::aliases::U256;
@@ -41,7 +42,7 @@ mod my_token {
     }
 
     #[pvm_contract_macros::method]
-    pub fn balance_of(account: Address) -> U256 {
+    pub fn balance_of(#[pvmsafe::unchecked] account: Address) -> U256 {
         let account: [u8; 20] = account.into();
         let key = balance_key(&account);
         let mut balance_bytes = vec![0u8; 32];
@@ -54,10 +55,15 @@ mod my_token {
     }
 
     #[pvm_contract_macros::method]
-    pub fn transfer(to: Address, amount: U256) -> Result<(), Error> {
+    pub fn transfer(
+        #[pvmsafe::unchecked] to: Address,
+        #[pvmsafe::refine(amount > 0)] amount: U256,
+    ) -> Result<(), Error> {
+        assume_positive(amount);
+
         let caller = get_caller();
         let sender_balance = balance_of(caller.into());
-
+        
         if sender_balance < amount {
             return Err(Error::InsufficientBalance);
         }
@@ -67,15 +73,26 @@ mod my_token {
         let new_recipient_balance = recipient_balance + amount;
 
         let to: [u8; 20] = to.into();
-        set_balance(&caller, new_sender_balance);
-        set_balance(&to, new_recipient_balance);
-        emit_transfer(&caller, &to, amount);
+
+        #[pvmsafe::locally]
+        {
+            set_balance(&caller, new_sender_balance);
+            set_balance(&to, new_recipient_balance);
+        }
+
+        #[pvmsafe::externally]
+        {
+            emit_transfer(&caller, &to, amount);
+        }
 
         Ok(())
     }
 
     #[pvm_contract_macros::method]
-    pub fn mint(to: Address, amount: U256) -> Result<(), Error> {
+    pub fn mint(
+        #[pvmsafe::unchecked] to: Address,
+        #[pvmsafe::refine(amount > 0)] amount: U256,
+    ) -> Result<(), Error> {
         let new_recipient_balance = balance_of(to).saturating_add(amount);
 
         let to: [u8; 20] = to.into();
@@ -115,6 +132,10 @@ mod my_token {
     fn set_balance(addr: &[u8; 20], amount: U256) {
         let key = balance_key(addr);
         api::set_storage(StorageFlags::empty(), &key, &amount.to_be_bytes::<32>());
+    }
+
+    fn assume_positive(#[pvmsafe::refine(x > 0)] x: U256) {
+        let _ = x;
     }
 
     fn get_caller() -> [u8; 20] {
