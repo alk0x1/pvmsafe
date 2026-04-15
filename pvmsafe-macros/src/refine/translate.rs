@@ -56,7 +56,7 @@ fn translate_comparison(b: &ExprBinary) -> Result<Vec<Constraint>, TranslateErro
     }
 }
 
-fn translate_term(expr: &Expr) -> Result<LinearExpr, TranslateError> {
+pub(super) fn translate_term(expr: &Expr) -> Result<LinearExpr, TranslateError> {
     match expr {
         Expr::Lit(ExprLit {
             lit: Lit::Int(i), ..

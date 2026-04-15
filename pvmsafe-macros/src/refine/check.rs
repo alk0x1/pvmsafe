@@ -1,6 +1,6 @@
 use super::fm::{self, FmError};
 use super::lir::Constraint;
-use super::translate::translate_predicate;
+use super::translate::{translate_predicate, translate_term};
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
@@ -203,6 +203,13 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
         self.assumptions = snapshot;
     }
 
+    fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
+        if matches!(b.op, syn::BinOp::Sub(_)) {
+            self.check_sub_safety(b);
+        }
+        visit::visit_expr_binary(self, b);
+    }
+
     fn visit_expr_assign(&mut self, assign: &'ast syn::ExprAssign) {
         if let Some(name) = lhs_ident(&assign.left) {
             self.drop_var(&name);
@@ -224,6 +231,8 @@ fn extract_given(e: &Expr) -> Vec<Constraint> {
         Expr::MethodCall(c) => &c.attrs,
         Expr::Block(b) => &b.attrs,
         Expr::If(i) => &i.attrs,
+        Expr::Binary(b) => &b.attrs,
+        Expr::Paren(p) => &p.attrs,
         _ => return Vec::new(),
     };
     for attr in attrs {
@@ -264,6 +273,32 @@ fn local_ident(pat: &Pat) -> Option<String> {
 }
 
 impl<'a> CallWalker<'a> {
+    fn check_sub_safety(&mut self, b: &syn::ExprBinary) {
+        let Ok(lhs) = translate_term(&b.left) else { return };
+        let Ok(rhs) = translate_term(&b.right) else { return };
+        let Some(diff) = rhs.sub(&lhs) else { return };
+        let goal = Constraint::new(diff);
+        match fm::entails(&self.assumptions, &goal) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.errors.push(Error::new(
+                    b.span(),
+                    format!(
+                        "pvmsafe: subtraction `{} - {}` may underflow; not provable from caller's assumptions",
+                        quote::ToTokens::to_token_stream(&b.left),
+                        quote::ToTokens::to_token_stream(&b.right),
+                    ),
+                ));
+            }
+            Err(FmError::Overflow) => {
+                self.errors.push(Error::new(
+                    b.span(),
+                    "pvmsafe: underflow check exceeded Fourier-Motzkin complexity bound",
+                ));
+            }
+        }
+    }
+
     fn drop_var(&mut self, name: &str) {
         self.assumptions
             .retain(|c| !c.expr.terms.contains_key(name));
@@ -850,6 +885,114 @@ mod tests {
                     #[pvmsafe::refine(x > 0)] x: u64,
                     #[pvmsafe::refine(y > 0)] y: u64,
                 ) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn subtraction_proven_safe_from_refinements() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(
+                    #[pvmsafe::refine(a >= b)] a: u64,
+                    #[pvmsafe::refine(b >= 0)] b: u64,
+                ) {
+                    let _ = a - b;
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn subtraction_rejected_without_refinements() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    let _ = a - b;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("may underflow"), "{errs:?}");
+    }
+
+    #[test]
+    fn subtraction_guarded_by_if_is_accepted() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    if a >= b {
+                        let _ = a - b;
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn subtraction_discharged_by_given_attribute() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    #[pvmsafe::given(a >= b)]
+                    { let _ = a - b; }
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn subtraction_with_literal_is_rejected_when_unprovable() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64) {
+                    let _ = a - 5;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("may underflow"));
+    }
+
+    #[test]
+    fn subtraction_with_literal_accepted_when_lower_bound_known() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(#[pvmsafe::refine(a >= 5)] a: u64) {
+                    let _ = a - 5;
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn non_integer_subtraction_is_silently_skipped() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64) {
+                    let _ = foo(a) - bar(a);
+                }
+                fn foo(x: u64) -> u64 { x }
+                fn bar(x: u64) -> u64 { x }
             }
             "#,
         );
