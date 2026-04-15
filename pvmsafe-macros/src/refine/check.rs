@@ -191,6 +191,18 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
         }
     }
 
+    fn visit_expr(&mut self, e: &'ast Expr) {
+        let given = extract_given(e);
+        if given.is_empty() {
+            visit::visit_expr(self, e);
+            return;
+        }
+        let snapshot = self.assumptions.clone();
+        self.assumptions.extend(given);
+        visit::visit_expr(self, e);
+        self.assumptions = snapshot;
+    }
+
     fn visit_expr_assign(&mut self, assign: &'ast syn::ExprAssign) {
         if let Some(name) = lhs_ident(&assign.left) {
             self.drop_var(&name);
@@ -204,6 +216,34 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
         }
         visit::visit_local(self, local);
     }
+}
+
+fn extract_given(e: &Expr) -> Vec<Constraint> {
+    let attrs: &[Attribute] = match e {
+        Expr::Call(c) => &c.attrs,
+        Expr::MethodCall(c) => &c.attrs,
+        Expr::Block(b) => &b.attrs,
+        Expr::If(i) => &i.attrs,
+        _ => return Vec::new(),
+    };
+    for attr in attrs {
+        let segs: Vec<_> = attr.path().segments.iter().collect();
+        let is_given = matches!(
+            segs.as_slice(),
+            [ns, name]
+                if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+                    && name.ident == "given"
+        );
+        if !is_given {
+            continue;
+        }
+        if let Ok(pred) = attr.parse_args::<Expr>() {
+            if let Ok(cs) = translate_predicate(&pred) {
+                return cs;
+            }
+        }
+    }
+    Vec::new()
 }
 
 fn lhs_ident(e: &Expr) -> Option<String> {
@@ -736,6 +776,80 @@ mod tests {
                     }
                 }
                 fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn given_attribute_adds_assumption_for_single_call() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64) {
+                    #[pvmsafe::given(a > 0)]
+                    callee(a);
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn given_does_not_leak_to_next_statement() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64) {
+                    #[pvmsafe::given(a > 0)]
+                    callee(a);
+                    callee(a);
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn given_composes_with_walker_inferred_facts() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    if a > 0 {
+                        #[pvmsafe::given(b > 0)]
+                        callee(a, b);
+                    }
+                }
+                fn callee(
+                    #[pvmsafe::refine(x > 0)] x: u64,
+                    #[pvmsafe::refine(y > 0)] y: u64,
+                ) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn given_with_conjunction_exposes_both_facts() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    #[pvmsafe::given(a > 0 && b > 0)]
+                    callee(a, b);
+                }
+                fn callee(
+                    #[pvmsafe::refine(x > 0)] x: u64,
+                    #[pvmsafe::refine(y > 0)] y: u64,
+                ) {}
             }
             "#,
         );
