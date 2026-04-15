@@ -1,0 +1,47 @@
+# Standalone package: empty [workspace] detaches from the outer pvmsafe
+# workspace (see ../Cargo.toml for the rationale). Mirrors
+# cargo-pvm-contract/examples/example-mytoken exactly except for the added
+# pvmsafe-macros dependency and the single bin.
+[workspace]
+
+[package]
+name = "pvmsafe-example"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+build = "build.rs"
+
+[[bin]]
+name = "pvmsafe-example-macro-pico-alloc"
+path = "src/pvmsafe-example-macro-pico-alloc.rs"
+
+[dependencies]
+# Using pvmsafe_macros::contract directly rather than a `pvmsafe` facade
+# crate: simplest path to resolve the attribute in this scaffolding stage.
+# Git deps instead of crates.io: only `cargo-pvm-contract` and
+# `cargo-pvm-contract-builder` are actually published; the rest live only in
+# the paritytech/cargo-pvm-contract repo. Pinned to a known-good rev so users
+# of pvmsafe don't need to clone anything manually.
+pvmsafe-macros = { path = "../pvmsafe-macros" }
+pvm-contract-macros = { git = "https://github.com/paritytech/cargo-pvm-contract", rev = "586425cae76f10af61a84070bf657296194ab4c0" }
+pvm-contract-types = { git = "https://github.com/paritytech/cargo-pvm-contract", rev = "586425cae76f10af61a84070bf657296194ab4c0" }
+pvm-contract-builder-dsl = { git = "https://github.com/paritytech/cargo-pvm-contract", rev = "586425cae76f10af61a84070bf657296194ab4c0" }
+pvm-bump-allocator = { git = "https://github.com/paritytech/cargo-pvm-contract", rev = "586425cae76f10af61a84070bf657296194ab4c0" }
+alloy-core = { version = "1.5", default-features = false, features = ["sol-types"] }
+pallet-revive-uapi = { version = "0.10", default-features = false }
+polkavm-derive = { version = "0.31.0" }
+ruint = { version = "1.17", default-features = false }
+picoalloc = { version = "5", default-features = false }
+
+[features]
+abi-gen = []
+
+[build-dependencies]
+cargo-pvm-contract-builder = { git = "https://github.com/paritytech/cargo-pvm-contract", rev = "586425cae76f10af61a84070bf657296194ab4c0" }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+overflow-checks = false

@@ -1,0 +1,10 @@
+# pvmsafe-example is intentionally NOT a workspace member: it pins a nightly
+# toolchain, uses a custom PolkaVM target, and its build.rs drives
+# cargo-pvm-contract-builder with release-profile/panic=abort settings that
+# conflict with a host proc-macro crate. Keeping it standalone (empty
+# [workspace] in its own Cargo.toml) mirrors how cargo-pvm-contract's own
+# example-mytoken is set up.
+[workspace]
+resolver = "2"
+members = ["pvmsafe-macros"]
+exclude = ["pvmsafe-example"]
