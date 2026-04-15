@@ -174,29 +174,61 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
 
     fn visit_expr_if(&mut self, expr_if: &'ast ExprIf) {
         let added: Vec<Constraint> = translate_predicate(&expr_if.cond).unwrap_or_default();
-        let n = added.len();
+        let snapshot = self.assumptions.clone();
+
         self.assumptions.extend(added.iter().cloned());
         self.visit_block(&expr_if.then_branch);
-        self.assumptions.truncate(self.assumptions.len() - n);
+        self.assumptions = snapshot.clone();
 
         if let Some((_, else_expr)) = &expr_if.else_branch {
-            let single_neg = if added.len() == 1 {
-                fm::negate(&added[0])
-            } else {
-                None
-            };
-            if let Some(neg) = single_neg {
-                self.assumptions.push(neg);
-                self.visit_expr(else_expr);
-                self.assumptions.pop();
-            } else {
-                self.visit_expr(else_expr);
+            if added.len() == 1 {
+                if let Some(neg) = fm::negate(&added[0]) {
+                    self.assumptions.push(neg);
+                }
             }
+            self.visit_expr(else_expr);
+            self.assumptions = snapshot;
         }
+    }
+
+    fn visit_expr_assign(&mut self, assign: &'ast syn::ExprAssign) {
+        if let Some(name) = lhs_ident(&assign.left) {
+            self.drop_var(&name);
+        }
+        visit::visit_expr_assign(self, assign);
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if let Some(name) = local_ident(&local.pat) {
+            self.drop_var(&name);
+        }
+        visit::visit_local(self, local);
+    }
+}
+
+fn lhs_ident(e: &Expr) -> Option<String> {
+    if let Expr::Path(ExprPath { path, .. }) = e {
+        if let Some(id) = path.get_ident() {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
+fn local_ident(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::Ident(id) => Some(id.ident.to_string()),
+        Pat::Type(pt) => local_ident(&pt.pat),
+        _ => None,
     }
 }
 
 impl<'a> CallWalker<'a> {
+    fn drop_var(&mut self, name: &str) {
+        self.assumptions
+            .retain(|c| !c.expr.terms.contains_key(name));
+    }
+
     fn check_call(&mut self, call: &ExprCall, info: &MethodInfo) {
         let mut bindings: HashMap<String, Expr> = HashMap::new();
         for (param, arg) in info.params.iter().zip(call.args.iter()) {
@@ -634,6 +666,80 @@ mod tests {
             "#,
         );
         assert_eq!(errs.len(), 1);
+    }
+
+    #[test]
+    fn reassignment_invalidates_assumption() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(mut amount: u64) {
+                    if amount > 0 {
+                        amount = 0;
+                        callee(amount);
+                    }
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn reassignment_does_not_affect_other_vars() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, mut b: u64) {
+                    if a > 0 {
+                        b = 0;
+                        callee(a);
+                    }
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn let_shadowing_invalidates_prior_refinement() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(#[pvmsafe::refine(x > 0)] x: u64) {
+                    let x: u64 = 0;
+                    callee(x);
+                }
+                fn callee(#[pvmsafe::refine(y > 0)] y: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn mutation_inside_then_branch_does_not_leak_to_sibling() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(mut amount: u64) {
+                    if amount > 0 {
+                        amount = 0;
+                    }
+                    if amount > 0 {
+                        callee(amount);
+                    }
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
     }
 
     #[test]
