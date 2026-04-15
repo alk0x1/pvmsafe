@@ -49,7 +49,7 @@ pub fn entails(assumptions: &[Constraint], goal: &Constraint) -> Result<bool, Fm
     }
 }
 
-fn negate(c: &Constraint) -> Option<Constraint> {
+pub(super) fn negate(c: &Constraint) -> Option<Constraint> {
     let neg_terms = c.expr.neg()?;
     let with_one = neg_terms.add(&LinearExpr::constant(1))?;
     Some(Constraint::new(with_one))

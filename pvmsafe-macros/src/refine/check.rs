@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::visit_mut::{self, VisitMut};
-use syn::{Attribute, Error, Expr, ExprCall, ExprPath, FnArg, Item, ItemFn, ItemMod, Pat};
+use syn::{Attribute, Error, Expr, ExprCall, ExprIf, ExprPath, FnArg, Item, ItemFn, ItemMod, Pat};
 
 struct MethodInfo {
     params: Vec<String>,
@@ -146,7 +146,7 @@ fn check_fn(
 
     let mut walker = CallWalker {
         methods,
-        assumptions: &assumptions,
+        assumptions,
         errors,
     };
     walker.visit_block(&f.block);
@@ -154,7 +154,7 @@ fn check_fn(
 
 struct CallWalker<'a> {
     methods: &'a HashMap<String, MethodInfo>,
-    assumptions: &'a [Constraint],
+    assumptions: Vec<Constraint>,
     errors: &'a mut Vec<Error>,
 }
 
@@ -170,6 +170,29 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
             }
         }
         visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_if(&mut self, expr_if: &'ast ExprIf) {
+        let added: Vec<Constraint> = translate_predicate(&expr_if.cond).unwrap_or_default();
+        let n = added.len();
+        self.assumptions.extend(added.iter().cloned());
+        self.visit_block(&expr_if.then_branch);
+        self.assumptions.truncate(self.assumptions.len() - n);
+
+        if let Some((_, else_expr)) = &expr_if.else_branch {
+            let single_neg = if added.len() == 1 {
+                fm::negate(&added[0])
+            } else {
+                None
+            };
+            if let Some(neg) = single_neg {
+                self.assumptions.push(neg);
+                self.visit_expr(else_expr);
+                self.assumptions.pop();
+            } else {
+                self.visit_expr(else_expr);
+            }
+        }
     }
 }
 
@@ -199,7 +222,7 @@ impl<'a> CallWalker<'a> {
             };
 
             for goal in goals {
-                match fm::entails(self.assumptions, &goal) {
+                match fm::entails(&self.assumptions, &goal) {
                     Ok(true) => {}
                     Ok(false) => {
                         self.errors.push(Error::new(
@@ -460,5 +483,173 @@ mod tests {
         );
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("`b`"));
+    }
+
+    #[test]
+    fn if_condition_discharges_refinement_in_then_branch() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(amount: u64) {
+                    if amount > 0 {
+                        callee(amount);
+                    }
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn else_branch_uses_negated_condition() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(amount: u64) {
+                    if amount <= 0 {
+                    } else {
+                        callee(amount);
+                    }
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn assumption_does_not_leak_past_if() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(amount: u64) {
+                    if amount > 0 {
+                    }
+                    callee(amount);
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn nested_ifs_accumulate_assumptions() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    if a > 0 {
+                        if b > 0 {
+                            callee(a, b);
+                        }
+                    }
+                }
+                fn callee(
+                    #[pvmsafe::refine(x > 0)] x: u64,
+                    #[pvmsafe::refine(y > 0)] y: u64,
+                ) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn inner_if_scope_does_not_leak_to_sibling() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    if a > 0 {
+                    }
+                    if b > 0 {
+                        callee(b);
+                    }
+                    callee(a);
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+    }
+
+    #[test]
+    fn untranslatable_condition_is_ignored_soundly() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    if a * b > 0 {
+                        callee(a);
+                    }
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn conjunctive_condition_both_facts_available() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    if a > 0 && b > 0 {
+                        callee(a, b);
+                    }
+                }
+                fn callee(
+                    #[pvmsafe::refine(x > 0)] x: u64,
+                    #[pvmsafe::refine(y > 0)] y: u64,
+                ) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn disjunctive_condition_not_negated_in_else() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    if a > 0 && b > 0 {
+                    } else {
+                        callee(a);
+                    }
+                }
+                fn callee(#[pvmsafe::refine(x > 0)] x: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+    }
+
+    #[test]
+    fn path_sensitivity_chains_through_transitivity() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64) {
+                    if a >= 10 {
+                        callee(a);
+                    }
+                }
+                fn callee(#[pvmsafe::refine(x >= 1)] x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
     }
 }
