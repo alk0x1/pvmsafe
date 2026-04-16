@@ -14,9 +14,29 @@ pub fn check_module(module: &ItemMod, errors: &mut Vec<Error>) {
     };
     for item in items {
         if let Item::Fn(f) = item {
-            check_block(&f.block, errors);
+            if !has_allow_reentrancy(&f.attrs) {
+                check_block(&f.block, errors);
+            }
         }
     }
+}
+
+fn has_allow_reentrancy(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let segs: Vec<_> = attr.path().segments.iter().collect();
+        let is_allow = matches!(
+            segs.as_slice(),
+            [ns, name]
+                if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+                    && name.ident == "allow"
+        );
+        if !is_allow {
+            return false;
+        }
+        attr.parse_args::<syn::Ident>()
+            .map(|id| id == "reentrancy")
+            .unwrap_or(false)
+    })
 }
 
 fn check_block(block: &Block, errors: &mut Vec<Error>) {
@@ -143,6 +163,58 @@ mod tests {
             "#,
         );
         assert!(errs.is_empty(), "{:?}", errs);
+    }
+
+    #[test]
+    fn allow_reentrancy_skips_check() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvmsafe::allow(reentrancy)]
+                fn f() {
+                    #[pvmsafe::externally] { let _ = 1; }
+                    #[pvmsafe::locally] { let _ = 2; }
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{:?}", errs);
+    }
+
+    #[test]
+    fn allow_reentrancy_only_affects_annotated_fn() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvmsafe::allow(reentrancy)]
+                fn safe() {
+                    #[pvmsafe::externally] { let _ = 1; }
+                    #[pvmsafe::locally] { let _ = 2; }
+                }
+                fn unsafe_fn() {
+                    #[pvmsafe::externally] { let _ = 1; }
+                    #[pvmsafe::locally] { let _ = 2; }
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+    }
+
+    #[test]
+    fn allow_other_rule_does_not_skip_reentrancy() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvmsafe::allow(something_else)]
+                fn f() {
+                    #[pvmsafe::externally] { let _ = 1; }
+                    #[pvmsafe::locally] { let _ = 2; }
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
     }
 
     #[test]
