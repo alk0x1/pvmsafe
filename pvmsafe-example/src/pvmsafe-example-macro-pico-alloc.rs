@@ -55,7 +55,6 @@ mod my_token {
     }
 
     #[pvm_contract_macros::method]
-    #[allow(unused_parens)]
     pub fn transfer(
         #[pvmsafe::unchecked] to: Address,
         #[pvmsafe::refine(amount > 0)] amount: U256,
@@ -64,14 +63,12 @@ mod my_token {
 
         let caller = get_caller();
         let sender_balance = balance_of(caller.into());
-        
+
         if sender_balance < amount {
             return Err(Error::InsufficientBalance);
         }
 
-        let new_sender_balance =
-            #[pvmsafe::given(sender_balance >= amount)]
-            (sender_balance - amount);
+        let new_sender_balance = sender_balance - amount;
         let recipient_balance = balance_of(to);
         let new_recipient_balance = recipient_balance + amount;
 

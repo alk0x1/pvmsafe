@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::visit_mut::{self, VisitMut};
-use syn::{Attribute, Error, Expr, ExprCall, ExprIf, ExprPath, FnArg, Item, ItemFn, ItemMod, Pat};
+use syn::{
+    Attribute, Block, Error, Expr, ExprCall, ExprIf, ExprPath, FnArg, Item, ItemFn, ItemMod, Pat,
+    Stmt,
+};
 
 struct MethodInfo {
     params: Vec<String>,
@@ -184,6 +187,26 @@ struct CallWalker<'a> {
 }
 
 impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
+    fn visit_block(&mut self, block: &'ast Block) {
+        let snapshot = self.assumptions.clone();
+
+        for stmt in &block.stmts {
+            self.visit_stmt(stmt);
+
+            if let Stmt::Expr(Expr::If(expr_if), _) = stmt {
+                if expr_if.else_branch.is_none() && block_diverges(&expr_if.then_branch) {
+                    for c in translate_predicate(&expr_if.cond).unwrap_or_default() {
+                        if let Some(neg) = fm::negate(&c) {
+                            self.assumptions.push(neg);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.assumptions = snapshot;
+    }
+
     fn visit_expr_call(&mut self, call: &'ast ExprCall) {
         if let Expr::Path(ExprPath { path, .. }) = &*call.func {
             if let Some(last) = path.segments.last() {
@@ -279,6 +302,21 @@ fn extract_given(e: &Expr) -> Vec<Constraint> {
         }
     }
     Vec::new()
+}
+
+fn block_diverges(block: &Block) -> bool {
+    match block.stmts.last() {
+        Some(Stmt::Expr(expr, _)) => expr_diverges(expr),
+        _ => false,
+    }
+}
+
+fn expr_diverges(expr: &Expr) -> bool {
+    match expr {
+        Expr::Return(_) | Expr::Break(_) | Expr::Continue(_) => true,
+        Expr::Block(b) => block_diverges(&b.block),
+        _ => false,
+    }
 }
 
 fn lhs_ident(e: &Expr) -> Option<String> {
@@ -1215,6 +1253,123 @@ mod tests {
         );
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("may underflow"), "{errs:?}");
+    }
+
+    #[test]
+    fn early_return_guard_adds_negation() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(x: u64) {
+                    if x < 5 {
+                        return;
+                    }
+                    callee(x);
+                }
+                fn callee(#[pvmsafe::refine(y >= 5)] y: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn early_return_negation_scoped_to_block() {
+        let errs = check(
+            r#"
+            mod m {
+                fn outer(x: u64) {
+                    {
+                        if x < 5 {
+                            return;
+                        }
+                    }
+                    callee(x);
+                }
+                fn callee(#[pvmsafe::refine(y >= 5)] y: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn multiple_guards_accumulate() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(a: u64, b: u64) {
+                    if a < 1 {
+                        return;
+                    }
+                    if b < 1 {
+                        return;
+                    }
+                    callee(a, b);
+                }
+                fn callee(
+                    #[pvmsafe::refine(x >= 1)] x: u64,
+                    #[pvmsafe::refine(y >= 1)] y: u64,
+                ) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn non_diverging_then_branch_not_treated_as_guard() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(x: u64) {
+                    if x < 5 {
+                        let _ = 0;
+                    }
+                    callee(x);
+                }
+                fn callee(#[pvmsafe::refine(y >= 5)] y: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+    }
+
+    #[test]
+    fn early_return_discharges_subtraction() {
+        let errs = check(
+            r#"
+            mod m {
+                fn withdraw(balance: u64, amount: u64) {
+                    if balance < amount {
+                        return;
+                    }
+                    let _ = balance - amount;
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn early_return_with_expr_body_diverges() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(x: u64) -> u64 {
+                    if x < 5 {
+                        return 0;
+                    }
+                    callee(x);
+                    0
+                }
+                fn callee(#[pvmsafe::refine(y >= 5)] y: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
     }
 
     #[test]
