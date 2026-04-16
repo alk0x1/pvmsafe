@@ -1,6 +1,7 @@
 use syn::visit_mut::{self, VisitMut};
 use syn::{
-    Attribute, ExprBinary, ExprBlock, ExprCall, ExprMethodCall, ExprParen, ItemFn, ItemMod, PatType,
+    Attribute, ExprBinary, ExprBlock, ExprCall, ExprMethodCall, ExprParen, ItemFn, ItemMod, Local,
+    PatType,
 };
 
 pub fn strip_pvmsafe_attrs(module: &mut ItemMod) {
@@ -38,6 +39,11 @@ impl VisitMut for Stripper {
     fn visit_item_fn_mut(&mut self, f: &mut ItemFn) {
         f.attrs.retain(|a| !is_pvmsafe(a));
         visit_mut::visit_item_fn_mut(self, f);
+    }
+
+    fn visit_local_mut(&mut self, local: &mut Local) {
+        local.attrs.retain(|a| !is_pvmsafe(a));
+        visit_mut::visit_local_mut(self, local);
     }
 
     fn visit_pat_type_mut(&mut self, pt: &mut PatType) {

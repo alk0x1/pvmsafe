@@ -288,6 +288,7 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
         }
         visit::visit_local(self, local);
         self.inject_ensures(local);
+        self.check_local_refine(local);
     }
 }
 
@@ -442,6 +443,72 @@ impl<'a> CallWalker<'a> {
         Substitute { bindings: &bindings }.visit_expr_mut(&mut substituted);
 
         if let Ok(cs) = translate_predicate(&substituted) {
+            self.assumptions.extend(cs);
+        }
+    }
+
+    fn check_local_refine(&mut self, local: &syn::Local) {
+        let pred = match extract_refine(&local.attrs) {
+            Some(p) => p,
+            None => return,
+        };
+        let bind_name = match local_ident(&local.pat) {
+            Some(n) => n,
+            None => return,
+        };
+
+        if let Some(init) = &local.init {
+            let mut bindings: HashMap<String, Expr> = HashMap::new();
+            bindings.insert("v".to_string(), (*init.expr).clone());
+            let mut obligation = pred.clone();
+            Substitute { bindings: &bindings }.visit_expr_mut(&mut obligation);
+
+            let goals = match translate_predicate(&obligation) {
+                Ok(cs) => cs,
+                Err(e) => {
+                    self.errors.push(Error::new(
+                        pred.span(),
+                        format!("pvmsafe: cannot translate let refinement: {e}"),
+                    ));
+                    return;
+                }
+            };
+
+            for goal in &goals {
+                match fm::entails(&self.assumptions, goal) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.errors.push(Error::new(
+                            local.span(),
+                            format!(
+                                "pvmsafe: let refinement `{}` not provable from assumptions",
+                                quote::ToTokens::to_token_stream(&pred)
+                            ),
+                        ));
+                        return;
+                    }
+                    Err(FmError::Overflow) => {
+                        self.errors.push(Error::new(
+                            local.span(),
+                            "pvmsafe: let refinement check exceeded Fourier-Motzkin complexity bound",
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
+
+        let mut inject_bindings: HashMap<String, Expr> = HashMap::new();
+        inject_bindings.insert(
+            "v".to_string(),
+            syn::parse_str::<Expr>(&bind_name).unwrap(),
+        );
+        let mut injected = pred.clone();
+        Substitute {
+            bindings: &inject_bindings,
+        }
+        .visit_expr_mut(&mut injected);
+        if let Ok(cs) = translate_predicate(&injected) {
             self.assumptions.extend(cs);
         }
     }
@@ -1536,5 +1603,123 @@ mod tests {
             "#,
         );
         assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn let_refine_accepted_when_provable() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(#[pvmsafe::refine(x > 0)] x: u64) {
+                    #[pvmsafe::refine(v > 0)]
+                    let y = x;
+                    callee(y);
+                }
+                fn callee(#[pvmsafe::refine(a > 0)] a: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn let_refine_rejected_when_unprovable() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64) {
+                    #[pvmsafe::refine(v > 0)]
+                    let y = x;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn let_refine_injects_assumption_for_subsequent_code() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64) {
+                    if x < 5 { return; }
+                    #[pvmsafe::refine(v >= 5)]
+                    let y = x;
+                    callee(y);
+                }
+                fn callee(#[pvmsafe::refine(a >= 5)] a: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn let_refine_with_literal() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f() {
+                    #[pvmsafe::refine(v > 0)]
+                    let x = 1;
+                    callee(x);
+                }
+                fn callee(#[pvmsafe::refine(a > 0)] a: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn let_refine_literal_zero_rejected() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f() {
+                    #[pvmsafe::refine(v > 0)]
+                    let x = 0;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn let_refine_discharges_subtraction() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    #[pvmsafe::refine(v >= amount)]
+                    let balance = amount;
+                    let _ = balance - amount;
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn let_refine_invalidated_by_shadowing() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(#[pvmsafe::refine(x > 0)] x: u64) {
+                    #[pvmsafe::refine(v > 0)]
+                    let y = x;
+                    let y = 0;
+                    callee(y);
+                }
+                fn callee(#[pvmsafe::refine(a > 0)] a: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
     }
 }
