@@ -277,8 +277,11 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
         if matches!(b.op, syn::BinOp::Sub(_)) {
             self.check_sub_safety(b);
         }
-        if matches!(b.op, syn::BinOp::Add(_)) {
-            self.check_add_safety(b);
+        if matches!(b.op, syn::BinOp::Add(_) | syn::BinOp::Mul(_)) {
+            self.check_overflow_safety(b);
+        }
+        if matches!(b.op, syn::BinOp::Div(_) | syn::BinOp::Rem(_)) {
+            self.check_div_safety(b);
         }
         visit::visit_expr_binary(self, b);
     }
@@ -396,7 +399,7 @@ impl<'a> CallWalker<'a> {
         }
     }
 
-    fn check_add_safety(&mut self, b: &syn::ExprBinary) {
+    fn check_overflow_safety(&mut self, b: &syn::ExprBinary) {
         if self.in_given {
             return;
         }
@@ -406,15 +409,54 @@ impl<'a> CallWalker<'a> {
         if translate_term(&b.left).is_err() || translate_term(&b.right).is_err() {
             return;
         }
+        let (op, checked, saturating) = match b.op {
+            syn::BinOp::Add(_) => ("+", "checked_add", "saturating_add"),
+            syn::BinOp::Mul(_) => ("*", "checked_mul", "saturating_mul"),
+            _ => return,
+        };
         self.errors.push(Error::new(
             b.span(),
             format!(
-                "pvmsafe: addition `{} + {}` may overflow; \
-                 use `checked_add` or `saturating_add`",
+                "pvmsafe: `{} {} {}` may overflow; use `{}` or `{}`",
                 quote::ToTokens::to_token_stream(&b.left),
+                op,
                 quote::ToTokens::to_token_stream(&b.right),
+                checked,
+                saturating,
             ),
         ));
+    }
+
+    fn check_div_safety(&mut self, b: &syn::ExprBinary) {
+        if self.in_given {
+            return;
+        }
+        let Ok(rhs) = translate_term(&b.right) else { return };
+        let Some(neg_rhs) = rhs.neg() else { return };
+        let Some(goal_expr) = neg_rhs.add(&super::lir::LinearExpr::constant(1)) else { return };
+        let goal = Constraint::new(goal_expr);
+        let op = if matches!(b.op, syn::BinOp::Div(_)) { "/" } else { "%" };
+        match fm::entails(&self.assumptions, &goal) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.errors.push(Error::new(
+                    b.span(),
+                    format!(
+                        "pvmsafe: `{} {} {}` may divide by zero; \
+                         divisor not provably non-zero",
+                        quote::ToTokens::to_token_stream(&b.left),
+                        op,
+                        quote::ToTokens::to_token_stream(&b.right),
+                    ),
+                ));
+            }
+            Err(FmError::Overflow) => {
+                self.errors.push(Error::new(
+                    b.span(),
+                    "pvmsafe: division-by-zero check exceeded Fourier-Motzkin complexity bound",
+                ));
+            }
+        }
     }
 
     fn check_sub_safety(&mut self, b: &syn::ExprBinary) {
@@ -1817,6 +1859,165 @@ mod tests {
             mod m {
                 fn f() {
                     let _ = foo() + bar();
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn multiplication_between_variables_is_flagged() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64, y: u64) {
+                    let _ = x * y;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("may overflow"));
+    }
+
+    #[test]
+    fn multiplication_between_literals_is_accepted() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f() {
+                    let _ = 2 * 3;
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn multiplication_suppressed_by_given() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64, y: u64) {
+                    let _ = #[pvmsafe::given(x > 0)] (x * y);
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn division_by_variable_without_proof_is_flagged() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64, y: u64) {
+                    let _ = x / y;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("divide by zero"));
+    }
+
+    #[test]
+    fn division_by_proven_nonzero_is_accepted() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64, #[pvmsafe::refine(y > 0)] y: u64) {
+                    let _ = x / y;
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn division_by_positive_literal_is_accepted() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64) {
+                    let _ = x / 2;
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn division_by_zero_literal_is_flagged() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64) {
+                    let _ = x / 0;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("divide by zero"));
+    }
+
+    #[test]
+    fn modulo_by_variable_without_proof_is_flagged() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64, y: u64) {
+                    let _ = x % y;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("divide by zero"));
+    }
+
+    #[test]
+    fn modulo_by_proven_nonzero_is_accepted() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64, #[pvmsafe::refine(y > 0)] y: u64) {
+                    let _ = x % y;
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn division_guarded_by_if_is_accepted() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64, y: u64) {
+                    if y < 1 { return; }
+                    let _ = x / y;
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn division_suppressed_by_given() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64, y: u64) {
+                    let _ = #[pvmsafe::given(y > 0)] (x / y);
                 }
             }
             "#,
