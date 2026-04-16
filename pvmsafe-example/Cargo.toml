@@ -15,6 +15,10 @@ build = "build.rs"
 name = "pvmsafe-example-macro-pico-alloc"
 path = "src/pvmsafe-example-macro-pico-alloc.rs"
 
+[[bin]]
+name = "pvmsafe-example-vault"
+path = "src/pvmsafe-example-vault.rs"
+
 [dependencies]
 # Using pvmsafe_macros::contract directly rather than a `pvmsafe` facade
 # crate: simplest path to resolve the attribute in this scaffolding stage.

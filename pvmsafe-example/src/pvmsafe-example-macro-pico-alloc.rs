@@ -59,8 +59,6 @@ mod my_token {
         #[pvmsafe::unchecked] to: Address,
         #[pvmsafe::refine(amount > 0)] amount: U256,
     ) -> Result<(), Error> {
-        assume_positive(amount);
-
         let caller = get_caller();
         let sender_balance = balance_of(caller.into());
 
@@ -68,7 +66,10 @@ mod my_token {
             return Err(Error::InsufficientBalance);
         }
 
-        let new_sender_balance = sender_balance - amount;
+        #[pvmsafe::refine(v >= amount)]
+        let safe_balance = sender_balance;
+
+        let new_sender_balance = safe_balance - amount;
         let recipient_balance = balance_of(to);
         let new_recipient_balance = recipient_balance.saturating_add(amount);
 
@@ -140,12 +141,6 @@ mod my_token {
         let key = balance_key(addr);
         api::set_storage(StorageFlags::empty(), &key, &amount.to_be_bytes::<32>());
     }
-    
-    #[pvmsafe::ensures(v > 0)]
-    fn assume_positive(#[pvmsafe::refine(x > 0)] x: U256) -> U256 {
-        x
-    }
-
     fn get_caller() -> [u8; 20] {
         let mut caller = [0u8; 20];
         api::caller(&mut caller);
