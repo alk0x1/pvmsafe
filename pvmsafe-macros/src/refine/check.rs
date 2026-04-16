@@ -10,6 +10,7 @@ use syn::{Attribute, Error, Expr, ExprCall, ExprIf, ExprPath, FnArg, Item, ItemF
 struct MethodInfo {
     params: Vec<String>,
     refinements: Vec<(String, Expr)>,
+    ensures: Option<Expr>,
 }
 
 pub fn check_module(module: &ItemMod, errors: &mut Vec<Error>) {
@@ -94,7 +95,31 @@ fn method_info(f: &ItemFn) -> MethodInfo {
             refinements.push((name, pred));
         }
     }
-    MethodInfo { params, refinements }
+    let ensures = extract_ensures(&f.attrs);
+    MethodInfo {
+        params,
+        refinements,
+        ensures,
+    }
+}
+
+fn extract_ensures(attrs: &[Attribute]) -> Option<Expr> {
+    for attr in attrs {
+        let segs: Vec<_> = attr.path().segments.iter().collect();
+        let is_ensures = matches!(
+            segs.as_slice(),
+            [ns, name]
+                if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+                    && name.ident == "ensures"
+        );
+        if !is_ensures {
+            continue;
+        }
+        if let Ok(expr) = attr.parse_args::<Expr>() {
+            return Some(expr);
+        }
+    }
+    None
 }
 
 fn param_name(pat: &Pat) -> String {
@@ -222,6 +247,7 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
             self.drop_var(&name);
         }
         visit::visit_local(self, local);
+        self.inject_ensures(local);
     }
 }
 
@@ -296,6 +322,35 @@ impl<'a> CallWalker<'a> {
                     "pvmsafe: underflow check exceeded Fourier-Motzkin complexity bound",
                 ));
             }
+        }
+    }
+
+    fn inject_ensures(&mut self, local: &syn::Local) {
+        let bind_name = match local_ident(&local.pat) {
+            Some(n) => n,
+            None => return,
+        };
+        let init = match &local.init {
+            Some(init) => init,
+            None => return,
+        };
+        let Expr::Call(call) = &*init.expr else { return };
+        let Expr::Path(ExprPath { path, .. }) = &*call.func else { return };
+        let Some(last) = path.segments.last() else { return };
+        let Some(info) = self.methods.get(&last.ident.to_string()) else { return };
+        let Some(ensures) = &info.ensures else { return };
+
+        let mut bindings: HashMap<String, Expr> = HashMap::new();
+        bindings.insert("v".to_string(), syn::parse_str::<Expr>(&bind_name).unwrap());
+        for (param, arg) in info.params.iter().zip(call.args.iter()) {
+            bindings.insert(param.clone(), arg.clone());
+        }
+
+        let mut substituted = ensures.clone();
+        Substitute { bindings: &bindings }.visit_expr_mut(&mut substituted);
+
+        if let Ok(cs) = translate_predicate(&substituted) {
+            self.assumptions.extend(cs);
         }
     }
 
@@ -1010,6 +1065,116 @@ mod tests {
                     }
                 }
                 fn callee(#[pvmsafe::refine(x >= 1)] x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn ensures_injects_assumption_at_call_site() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller() {
+                    let x = producer();
+                    consumer(x);
+                }
+                #[pvmsafe::ensures(v > 0)]
+                fn producer() -> u64 { 1 }
+                fn consumer(#[pvmsafe::refine(y > 0)] y: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn ensures_without_let_binding_does_not_inject() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller() {
+                    producer();
+                    let x = 0;
+                    consumer(x);
+                }
+                #[pvmsafe::ensures(v > 0)]
+                fn producer() -> u64 { 1 }
+                fn consumer(#[pvmsafe::refine(y > 0)] y: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn ensures_substitutes_params_at_call_site() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(#[pvmsafe::refine(n > 0)] n: u64) {
+                    let result = add_one(n);
+                    consumer(result);
+                }
+                #[pvmsafe::ensures(v > x)]
+                fn add_one(x: u64) -> u64 { 0 }
+                fn consumer(#[pvmsafe::refine(y > 0)] y: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn ensures_scoped_to_binding_name() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller() {
+                    let a = producer();
+                    consumer(a);
+                }
+                #[pvmsafe::ensures(v > 0)]
+                fn producer() -> u64 { 1 }
+                fn consumer(#[pvmsafe::refine(y > 0)] y: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn ensures_invalidated_by_shadowing() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller() {
+                    let x = producer();
+                    let x: u64 = 0;
+                    consumer(x);
+                }
+                #[pvmsafe::ensures(v > 0)]
+                fn producer() -> u64 { 1 }
+                fn consumer(#[pvmsafe::refine(y > 0)] y: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+    }
+
+    #[test]
+    fn ensures_discharges_subtraction_safety() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    let balance = get_balance();
+                    let _ = balance - amount;
+                }
+                #[pvmsafe::ensures(v >= amount)]
+                fn get_balance() -> u64 { 0 }
             }
             "#,
         );
