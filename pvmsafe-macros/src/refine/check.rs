@@ -178,6 +178,7 @@ fn check_fn(
         methods,
         assumptions,
         ensures,
+        in_given: false,
         errors,
     };
     walker.visit_block(&f.block);
@@ -187,6 +188,7 @@ struct CallWalker<'a> {
     methods: &'a HashMap<String, MethodInfo>,
     assumptions: Vec<Constraint>,
     ensures: Option<&'a Expr>,
+    in_given: bool,
     errors: &'a mut Vec<Error>,
 }
 
@@ -256,9 +258,12 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
             return;
         }
         let snapshot = self.assumptions.clone();
+        let was_in_given = self.in_given;
         self.assumptions.extend(given);
+        self.in_given = true;
         visit::visit_expr(self, e);
         self.assumptions = snapshot;
+        self.in_given = was_in_given;
     }
 
     fn visit_expr_return(&mut self, ret: &'ast syn::ExprReturn) {
@@ -271,6 +276,9 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
     fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
         if matches!(b.op, syn::BinOp::Sub(_)) {
             self.check_sub_safety(b);
+        }
+        if matches!(b.op, syn::BinOp::Add(_)) {
+            self.check_add_safety(b);
         }
         visit::visit_expr_binary(self, b);
     }
@@ -386,6 +394,27 @@ impl<'a> CallWalker<'a> {
                 }
             }
         }
+    }
+
+    fn check_add_safety(&mut self, b: &syn::ExprBinary) {
+        if self.in_given {
+            return;
+        }
+        if matches!(*b.left, Expr::Lit(_)) && matches!(*b.right, Expr::Lit(_)) {
+            return;
+        }
+        if translate_term(&b.left).is_err() || translate_term(&b.right).is_err() {
+            return;
+        }
+        self.errors.push(Error::new(
+            b.span(),
+            format!(
+                "pvmsafe: addition `{} + {}` may overflow; \
+                 use `checked_add` or `saturating_add`",
+                quote::ToTokens::to_token_stream(&b.left),
+                quote::ToTokens::to_token_stream(&b.right),
+            ),
+        ));
     }
 
     fn check_sub_safety(&mut self, b: &syn::ExprBinary) {
@@ -1278,7 +1307,7 @@ mod tests {
                     consumer(result);
                 }
                 #[pvmsafe::ensures(v > x)]
-                fn add_one(x: u64) -> u64 { x + 1 }
+                fn add_one(x: u64) -> u64 { #[pvmsafe::given(x + 1 > x)] (x + 1) }
                 fn consumer(#[pvmsafe::refine(y > 0)] y: u64) {}
             }
             "#,
@@ -1721,5 +1750,77 @@ mod tests {
             "#,
         );
         assert_eq!(errs.len(), 1);
+    }
+
+    #[test]
+    fn addition_between_variables_is_flagged() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64, y: u64) {
+                    let _ = x + y;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("may overflow"));
+    }
+
+    #[test]
+    fn addition_between_literals_is_accepted() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f() {
+                    let _ = 1 + 2;
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn addition_variable_plus_literal_is_flagged() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64) {
+                    let _ = x + 1;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("may overflow"));
+    }
+
+    #[test]
+    fn addition_suppressed_by_given() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f(x: u64, y: u64) {
+                    let _ = #[pvmsafe::given(x + y >= x)] (x + y);
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn addition_on_non_integer_is_skipped() {
+        let errs = check(
+            r#"
+            mod m {
+                fn f() {
+                    let _ = foo() + bar();
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
     }
 }

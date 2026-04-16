@@ -70,7 +70,7 @@ mod my_token {
 
         let new_sender_balance = sender_balance - amount;
         let recipient_balance = balance_of(to);
-        let new_recipient_balance = recipient_balance + amount;
+        let new_recipient_balance = recipient_balance.saturating_add(amount);
 
         let to: [u8; 20] = to.into();
 
