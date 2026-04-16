@@ -140,9 +140,10 @@ mod my_token {
         let key = balance_key(addr);
         api::set_storage(StorageFlags::empty(), &key, &amount.to_be_bytes::<32>());
     }
-
-    fn assume_positive(#[pvmsafe::refine(x > 0)] x: U256) {
-        let _ = x;
+    
+    #[pvmsafe::ensures(v > 0)]
+    fn assume_positive(#[pvmsafe::refine(x > 0)] x: U256) -> U256 {
+        x
     }
 
     fn get_caller() -> [u8; 20] {

@@ -172,9 +172,12 @@ fn check_fn(
         }
     }
 
+    let ensures = info.and_then(|i| i.ensures.as_ref());
+
     let mut walker = CallWalker {
         methods,
         assumptions,
+        ensures,
         errors,
     };
     walker.visit_block(&f.block);
@@ -183,6 +186,7 @@ fn check_fn(
 struct CallWalker<'a> {
     methods: &'a HashMap<String, MethodInfo>,
     assumptions: Vec<Constraint>,
+    ensures: Option<&'a Expr>,
     errors: &'a mut Vec<Error>,
 }
 
@@ -201,6 +205,12 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
                         }
                     }
                 }
+            }
+        }
+
+        if let Some(ensures) = self.ensures {
+            if let Some(Stmt::Expr(expr, None)) = block.stmts.last() {
+                self.check_ensures(ensures, expr, expr.span());
             }
         }
 
@@ -249,6 +259,13 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
         self.assumptions.extend(given);
         visit::visit_expr(self, e);
         self.assumptions = snapshot;
+    }
+
+    fn visit_expr_return(&mut self, ret: &'ast syn::ExprReturn) {
+        if let (Some(ensures), Some(expr)) = (self.ensures, &ret.expr) {
+            self.check_ensures(ensures, expr, ret.span());
+        }
+        visit::visit_expr_return(self, ret);
     }
 
     fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
@@ -337,6 +354,39 @@ fn local_ident(pat: &Pat) -> Option<String> {
 }
 
 impl<'a> CallWalker<'a> {
+    fn check_ensures(&mut self, ensures: &Expr, ret_expr: &Expr, span: proc_macro2::Span) {
+        let mut bindings: HashMap<String, Expr> = HashMap::new();
+        bindings.insert("v".to_string(), ret_expr.clone());
+        let mut substituted = ensures.clone();
+        Substitute { bindings: &bindings }.visit_expr_mut(&mut substituted);
+
+        let goals = match translate_predicate(&substituted) {
+            Ok(cs) => cs,
+            Err(_) => return,
+        };
+
+        for goal in goals {
+            match fm::entails(&self.assumptions, &goal) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.errors.push(Error::new(
+                        span,
+                        format!(
+                            "pvmsafe: ensures `{}` not provable at return site",
+                            quote::ToTokens::to_token_stream(ensures)
+                        ),
+                    ));
+                }
+                Err(FmError::Overflow) => {
+                    self.errors.push(Error::new(
+                        span,
+                        "pvmsafe: ensures check exceeded Fourier-Motzkin complexity bound",
+                    ));
+                }
+            }
+        }
+    }
+
     fn check_sub_safety(&mut self, b: &syn::ExprBinary) {
         let Ok(lhs) = translate_term(&b.left) else { return };
         let Ok(rhs) = translate_term(&b.right) else { return };
@@ -1161,7 +1211,7 @@ mod tests {
                     consumer(result);
                 }
                 #[pvmsafe::ensures(v > x)]
-                fn add_one(x: u64) -> u64 { 0 }
+                fn add_one(x: u64) -> u64 { x + 1 }
                 fn consumer(#[pvmsafe::refine(y > 0)] y: u64) {}
             }
             "#,
@@ -1383,9 +1433,10 @@ mod tests {
             mod m {
                 fn caller(#[pvmsafe::refine(amount > 0)] amount: u64) {
                     let balance = get_balance();
+                    if balance < amount { return; }
                     let _ = balance - amount;
                 }
-                #[pvmsafe::ensures(v >= amount)]
+                #[pvmsafe::ensures(v >= 0)]
                 fn get_balance() -> u64 { 0 }
             }
             "#,
@@ -1425,6 +1476,62 @@ mod tests {
                 }
                 #[pvmsafe::ensures(v >= 0)]
                 fn get_balance() -> u64 { 0 }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn ensures_body_that_violates_predicate_is_rejected() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvmsafe::ensures(v > 0)]
+                fn bad() -> u64 { 0 }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn ensures_explicit_return_is_checked() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvmsafe::ensures(v > 0)]
+                fn bad(x: u64) -> u64 {
+                    return 0;
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not provable"));
+    }
+
+    #[test]
+    fn ensures_body_satisfying_predicate_is_accepted() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvmsafe::ensures(v > 0)]
+                fn good() -> u64 { 1 }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn ensures_uses_param_refinements_as_assumptions() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvmsafe::ensures(v >= x)]
+                fn identity(#[pvmsafe::refine(x > 0)] x: u64) -> u64 { x }
             }
             "#,
         );
