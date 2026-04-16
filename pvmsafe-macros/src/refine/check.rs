@@ -1165,6 +1165,59 @@ mod tests {
     }
 
     #[test]
+    fn vault_contract_withdraw_is_safe() {
+        let errs = check(
+            r#"
+            mod vault {
+                #[pvmsafe::ensures(v >= 0)]
+                fn get_balance(addr: u64) -> u64 { 0 }
+
+                fn set_balance(addr: u64, amount: u64) {}
+                fn transfer_to(addr: u64, amount: u64) {}
+
+                fn withdraw(
+                    #[pvmsafe::refine(amount > 0)] amount: u64,
+                    caller: u64,
+                ) {
+                    let balance = get_balance(caller);
+                    if balance >= amount {
+                        let new_balance = balance - amount;
+                        set_balance(caller, new_balance);
+                        transfer_to(caller, amount);
+                    }
+                }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn vault_contract_withdraw_without_guard_fails() {
+        let errs = check(
+            r#"
+            mod vault {
+                #[pvmsafe::ensures(v >= 0)]
+                fn get_balance(addr: u64) -> u64 { 0 }
+
+                fn set_balance(addr: u64, amount: u64) {}
+
+                fn withdraw(
+                    #[pvmsafe::refine(amount > 0)] amount: u64,
+                    caller: u64,
+                ) {
+                    let balance = get_balance(caller);
+                    let new_balance = balance - amount;
+                    set_balance(caller, new_balance);
+                }
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("may underflow"), "{errs:?}");
+    }
+
+    #[test]
     fn ensures_discharges_subtraction_safety() {
         let errs = check(
             r#"

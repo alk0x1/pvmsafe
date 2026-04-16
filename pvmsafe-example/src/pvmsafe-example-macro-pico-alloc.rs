@@ -97,14 +97,21 @@ mod my_token {
         #[pvmsafe::refine(amount > 0)] amount: U256,
     ) -> Result<(), Error> {
         let new_recipient_balance = balance_of(to).saturating_add(amount);
+        let new_supply = total_supply().saturating_add(amount);
 
         let to: [u8; 20] = to.into();
-        set_balance(&to, new_recipient_balance);
 
-        let new_supply = total_supply().saturating_add(amount);
-        set_total_supply(new_supply);
+        #[pvmsafe::locally]
+        {
+            set_balance(&to, new_recipient_balance);
+            set_total_supply(new_supply);
+        }
 
-        emit_transfer(&[0u8; 20], &to, amount);
+        #[pvmsafe::externally]
+        {
+            emit_transfer(&[0u8; 20], &to, amount);
+        }
+
         Ok(())
     }
 
