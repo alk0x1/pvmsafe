@@ -372,7 +372,11 @@ impl<'a> CallWalker<'a> {
             Some(init) => init,
             None => return,
         };
-        let Expr::Call(call) = &*init.expr else { return };
+        let init_expr = match &*init.expr {
+            Expr::Try(t) => &*t.expr,
+            other => other,
+        };
+        let Expr::Call(call) = init_expr else { return };
         let Expr::Path(ExprPath { path, .. }) = &*call.func else { return };
         let Some(last) = path.segments.last() else { return };
         let Some(info) = self.methods.get(&last.ident.to_string()) else { return };
@@ -1382,6 +1386,44 @@ mod tests {
                     let _ = balance - amount;
                 }
                 #[pvmsafe::ensures(v >= amount)]
+                fn get_balance() -> u64 { 0 }
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn ensures_works_through_try_operator() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller() {
+                    let x = producer()?;
+                    consumer(x);
+                }
+                #[pvmsafe::ensures(v > 0)]
+                fn producer() -> u64 { 1 }
+                fn consumer(#[pvmsafe::refine(y > 0)] y: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn ensures_through_try_discharges_subtraction() {
+        let errs = check(
+            r#"
+            mod m {
+                fn caller(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    let balance = get_balance()?;
+                    if balance < amount {
+                        return;
+                    }
+                    let _ = balance - amount;
+                }
+                #[pvmsafe::ensures(v >= 0)]
                 fn get_balance() -> u64 { 0 }
             }
             "#,
