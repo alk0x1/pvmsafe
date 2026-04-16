@@ -1,5 +1,5 @@
 use super::fm::{self, FmError};
-use super::lir::Constraint;
+use super::lir::{Constraint, LinearExpr};
 use super::translate::{translate_predicate, translate_term};
 use std::collections::HashMap;
 use syn::spanned::Spanned;
@@ -21,6 +21,8 @@ pub fn check_module(module: &ItemMod, errors: &mut Vec<Error>) {
         return;
     };
 
+    let has_invariant = has_conservation_invariant(&module.attrs);
+
     for item in items {
         if let Item::Fn(f) = item {
             check_entrypoint_coverage(f, errors);
@@ -36,8 +38,29 @@ pub fn check_module(module: &ItemMod, errors: &mut Vec<Error>) {
 
     for item in items {
         let Item::Fn(f) = item else { continue };
-        check_fn(f, &methods, errors);
+        check_fn(f, &methods, has_invariant, errors);
     }
+}
+
+fn has_conservation_invariant(attrs: &[Attribute]) -> bool {
+    for attr in attrs {
+        let segs: Vec<_> = attr.path().segments.iter().collect();
+        let is_invariant = matches!(
+            segs.as_slice(),
+            [ns, name]
+                if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+                    && name.ident == "invariant"
+        );
+        if !is_invariant {
+            continue;
+        }
+        if let Ok(id) = attr.parse_args::<syn::Ident>() {
+            if id == "conserves" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn is_entrypoint(f: &ItemFn) -> bool {
@@ -154,6 +177,7 @@ fn extract_refine(attrs: &[Attribute]) -> Option<Expr> {
 fn check_fn(
     f: &ItemFn,
     methods: &HashMap<String, MethodInfo>,
+    has_invariant: bool,
     errors: &mut Vec<Error>,
 ) {
     let name = f.sig.ident.to_string();
@@ -174,14 +198,34 @@ fn check_fn(
 
     let ensures = info.and_then(|i| i.ensures.as_ref());
 
+    let delta_acc = if has_invariant && is_entrypoint(f) {
+        Some(LinearExpr::constant(0))
+    } else {
+        None
+    };
+    let track_conservation = delta_acc.is_some();
+
     let mut walker = CallWalker {
         methods,
         assumptions,
         ensures,
         in_given: false,
+        delta_acc,
         errors,
     };
     walker.visit_block(&f.block);
+
+    if track_conservation && !block_diverges(&f.block) {
+        walker.check_conservation(tail_span(&f.block));
+    }
+}
+
+fn tail_span(block: &Block) -> proc_macro2::Span {
+    block
+        .stmts
+        .last()
+        .map(|s| s.span())
+        .unwrap_or_else(|| block.span())
 }
 
 struct CallWalker<'a> {
@@ -189,6 +233,7 @@ struct CallWalker<'a> {
     assumptions: Vec<Constraint>,
     ensures: Option<&'a Expr>,
     in_given: bool,
+    delta_acc: Option<LinearExpr>,
     errors: &'a mut Vec<Error>,
 }
 
@@ -235,10 +280,12 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
     fn visit_expr_if(&mut self, expr_if: &'ast ExprIf) {
         let added: Vec<Constraint> = translate_predicate(&expr_if.cond).unwrap_or_default();
         let snapshot = self.assumptions.clone();
+        let delta_snapshot = self.delta_acc.clone();
 
         self.assumptions.extend(added.iter().cloned());
         self.visit_block(&expr_if.then_branch);
         self.assumptions = snapshot.clone();
+        self.delta_acc = delta_snapshot.clone();
 
         if let Some((_, else_expr)) = &expr_if.else_branch {
             if added.len() == 1 {
@@ -248,10 +295,13 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
             }
             self.visit_expr(else_expr);
             self.assumptions = snapshot;
+            self.delta_acc = delta_snapshot;
         }
     }
 
     fn visit_expr(&mut self, e: &'ast Expr) {
+        self.apply_delta(e);
+
         let given = extract_given(e);
         if given.is_empty() {
             visit::visit_expr(self, e);
@@ -269,6 +319,9 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
     fn visit_expr_return(&mut self, ret: &'ast syn::ExprReturn) {
         if let (Some(ensures), Some(expr)) = (self.ensures, &ret.expr) {
             self.check_ensures(ensures, expr, ret.span());
+        }
+        if self.delta_acc.is_some() {
+            self.check_conservation(ret.span());
         }
         visit::visit_expr_return(self, ret);
     }
@@ -301,6 +354,34 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
         self.inject_ensures(local);
         self.check_local_refine(local);
     }
+}
+
+fn extract_delta(e: &Expr) -> Option<Expr> {
+    let attrs: &[Attribute] = match e {
+        Expr::Call(c) => &c.attrs,
+        Expr::MethodCall(c) => &c.attrs,
+        Expr::Block(b) => &b.attrs,
+        Expr::If(i) => &i.attrs,
+        Expr::Binary(b) => &b.attrs,
+        Expr::Paren(p) => &p.attrs,
+        _ => return None,
+    };
+    for attr in attrs {
+        let segs: Vec<_> = attr.path().segments.iter().collect();
+        let is_delta = matches!(
+            segs.as_slice(),
+            [ns, name]
+                if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+                    && name.ident == "delta"
+        );
+        if !is_delta {
+            continue;
+        }
+        if let Ok(expr) = attr.parse_args::<Expr>() {
+            return Some(expr);
+        }
+    }
+    None
 }
 
 fn extract_given(e: &Expr) -> Vec<Constraint> {
@@ -366,6 +447,60 @@ fn local_ident(pat: &Pat) -> Option<String> {
 }
 
 impl<'a> CallWalker<'a> {
+    fn apply_delta(&mut self, e: &Expr) {
+        let Some(delta_expr) = extract_delta(e) else { return };
+        if self.delta_acc.is_none() {
+            return;
+        }
+        match translate_term(&delta_expr) {
+            Ok(lin) => {
+                let acc = self.delta_acc.as_ref().unwrap();
+                match acc.add(&lin) {
+                    Some(updated) => self.delta_acc = Some(updated),
+                    None => self.errors.push(Error::new(
+                        delta_expr.span(),
+                        "pvmsafe: delta accumulation overflowed",
+                    )),
+                }
+            }
+            Err(err) => self.errors.push(Error::new(
+                delta_expr.span(),
+                format!("pvmsafe: delta expression must be linear: {err}"),
+            )),
+        }
+    }
+
+    fn check_conservation(&mut self, span: proc_macro2::Span) {
+        let Some(acc) = self.delta_acc.clone() else { return };
+        let Some(neg) = acc.neg() else {
+            self.errors.push(Error::new(
+                span,
+                "pvmsafe: conservation check overflow",
+            ));
+            return;
+        };
+        for goal_expr in [acc, neg] {
+            let goal = Constraint::new(goal_expr);
+            match fm::entails(&self.assumptions, &goal) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.errors.push(Error::new(
+                        span,
+                        "pvmsafe: conservation invariant violated; deltas do not sum to zero",
+                    ));
+                    return;
+                }
+                Err(FmError::Overflow) => {
+                    self.errors.push(Error::new(
+                        span,
+                        "pvmsafe: conservation check exceeded Fourier-Motzkin complexity bound",
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+
     fn check_ensures(&mut self, ensures: &Expr, ret_expr: &Expr, span: proc_macro2::Span) {
         let mut bindings: HashMap<String, Expr> = HashMap::new();
         bindings.insert("v".to_string(), ret_expr.clone());
@@ -2023,5 +2158,241 @@ mod tests {
             "#,
         );
         assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_balanced_deltas_accepted() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn transfer(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    #[pvmsafe::delta(-amount)]
+                    set_a(amount);
+                    #[pvmsafe::delta(amount)]
+                    set_b(amount);
+                }
+                fn set_a(x: u64) {}
+                fn set_b(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_unbalanced_rejected() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn bad(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    #[pvmsafe::delta(-amount)]
+                    set_a(amount);
+                }
+                fn set_a(x: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("conservation"), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_mint_with_supply_accepted() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn mint(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    #[pvmsafe::delta(amount)]
+                    set_balance(amount);
+                    #[pvmsafe::delta(-amount)]
+                    set_supply(amount);
+                }
+                fn set_balance(x: u64) {}
+                fn set_supply(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_early_return_before_deltas_ok() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn transfer(
+                    #[pvmsafe::refine(amount > 0)] amount: u64,
+                    #[pvmsafe::unchecked] flag: u64,
+                ) {
+                    if flag > 0 { return; }
+                    #[pvmsafe::delta(-amount)]
+                    set_a(amount);
+                    #[pvmsafe::delta(amount)]
+                    set_b(amount);
+                }
+                fn set_a(x: u64) {}
+                fn set_b(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_non_entrypoint_not_checked() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                fn helper(amount: u64) {
+                    #[pvmsafe::delta(-amount)]
+                    set_a(amount);
+                }
+                fn set_a(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_no_invariant_no_check() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn transfer(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    #[pvmsafe::delta(-amount)]
+                    set_a(amount);
+                }
+                fn set_a(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_multiple_writes_sum_to_zero() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn split(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    #[pvmsafe::delta(-amount)]
+                    a(amount);
+                    #[pvmsafe::delta(amount)]
+                    b(amount);
+                    #[pvmsafe::delta(-amount)]
+                    c(amount);
+                    #[pvmsafe::delta(amount)]
+                    d(amount);
+                }
+                fn a(x: u64) {}
+                fn b(x: u64) {}
+                fn c(x: u64) {}
+                fn d(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_branch_scoped_deltas() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn f(
+                    #[pvmsafe::refine(amount > 0)] amount: u64,
+                    #[pvmsafe::unchecked] flag: u64,
+                ) {
+                    if flag > 0 {
+                        #[pvmsafe::delta(-amount)]
+                        a(amount);
+                        #[pvmsafe::delta(amount)]
+                        b(amount);
+                    }
+                }
+                fn a(x: u64) {}
+                fn b(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_literal_deltas_accepted() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn f() {
+                    #[pvmsafe::delta(5)]
+                    a(5);
+                    #[pvmsafe::delta(-5)]
+                    b(5);
+                }
+                fn a(x: u64) {}
+                fn b(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_explicit_return_checks() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn f(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    #[pvmsafe::delta(-amount)]
+                    a(amount);
+                    return;
+                }
+                fn a(x: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("conservation"), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_unbalanced_literal_rejected() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn f() {
+                    #[pvmsafe::delta(5)]
+                    a(5);
+                    #[pvmsafe::delta(-3)]
+                    b(3);
+                }
+                fn a(x: u64) {}
+                fn b(x: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("conservation"), "{errs:?}");
     }
 }

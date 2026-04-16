@@ -5,6 +5,7 @@ use pallet_revive_uapi::{HostFnImpl as api, StorageFlags};
 use ruint::aliases::U256;
 
 #[pvmsafe_macros::contract]
+#[pvmsafe::invariant(conserves)]
 #[pvm_contract_macros::contract("MyToken.sol", allocator = "pico")]
 mod my_token {
     use super::*;
@@ -77,7 +78,9 @@ mod my_token {
 
         #[pvmsafe::locally]
         {
+            #[pvmsafe::delta(-amount)]
             set_balance(&caller, new_sender_balance);
+            #[pvmsafe::delta(amount)]
             set_balance(&to, new_recipient_balance);
         }
 
@@ -101,7 +104,9 @@ mod my_token {
 
         #[pvmsafe::locally]
         {
+            #[pvmsafe::delta(amount)]
             set_balance(&to, new_recipient_balance);
+            #[pvmsafe::delta(-amount)]
             set_total_supply(new_supply);
         }
 

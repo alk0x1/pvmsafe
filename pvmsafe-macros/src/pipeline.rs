@@ -175,6 +175,44 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_emits_conservation_error() {
+        let errs = errors(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn f(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    #[pvmsafe::delta(-amount)]
+                    a(amount);
+                }
+                fn a(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.iter().any(|e| e.contains("conservation")), "{errs:?}");
+    }
+
+    #[test]
+    fn pipeline_strips_invariant_and_delta_attrs() {
+        assert!(output_contains_no_pvmsafe(
+            r#"
+            #[pvmsafe::invariant(conserves)]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn f(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    #[pvmsafe::delta(-amount)]
+                    a(amount);
+                    #[pvmsafe::delta(amount)]
+                    b(amount);
+                }
+                fn a(x: u64) {}
+                fn b(x: u64) {}
+            }
+            "#,
+        ));
+    }
+
+    #[test]
     fn pipeline_clean_code_produces_no_errors() {
         let errs = errors(
             r#"

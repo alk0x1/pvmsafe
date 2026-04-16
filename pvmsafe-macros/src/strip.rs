@@ -41,6 +41,11 @@ impl VisitMut for Stripper {
         visit_mut::visit_item_fn_mut(self, f);
     }
 
+    fn visit_item_mod_mut(&mut self, m: &mut ItemMod) {
+        m.attrs.retain(|a| !is_pvmsafe(a));
+        visit_mut::visit_item_mod_mut(self, m);
+    }
+
     fn visit_local_mut(&mut self, local: &mut Local) {
         local.attrs.retain(|a| !is_pvmsafe(a));
         visit_mut::visit_local_mut(self, local);
