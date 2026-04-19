@@ -237,6 +237,7 @@ fn check_fn(
         ensures,
         in_given: false,
         delta_acc,
+        fn_name: name.clone(),
         errors,
     };
     walker.visit_block(&f.block);
@@ -260,6 +261,7 @@ struct CallWalker<'a> {
     ensures: Option<&'a Expr>,
     in_given: bool,
     delta_acc: Option<HashMap<String, LinearExpr>>,
+    fn_name: String,
     errors: &'a mut Vec<Error>,
 }
 
@@ -531,14 +533,16 @@ impl<'a> CallWalker<'a> {
                 match fm::entails(&self.assumptions, &goal) {
                     Ok(true) => {}
                     Ok(false) => {
+                        let fn_name = &self.fn_name;
                         let msg = if group == DEFAULT_GROUP {
-                            "pvmsafe: conservation invariant violated; \
-                             deltas do not sum to zero"
-                                .to_string()
+                            format!(
+                                "pvmsafe: conservation invariant violated in `{fn_name}`; \
+                                 declared deltas do not sum to zero on this path"
+                            )
                         } else {
                             format!(
-                                "pvmsafe: conservation invariant violated for group `{group}`; \
-                                 deltas do not sum to zero"
+                                "pvmsafe: conservation invariant violated in `{fn_name}` for group `{group}`; \
+                                 declared deltas do not sum to zero on this path"
                             )
                         };
                         self.errors.push(Error::new(span, msg));
