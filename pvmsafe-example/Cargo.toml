@@ -19,6 +19,10 @@ path = "src/pvmsafe-example-macro-pico-alloc.rs"
 name = "pvmsafe-example-vault"
 path = "src/pvmsafe-example-vault.rs"
 
+[[bin]]
+name = "pvmsafe-example-erc20-full"
+path = "src/pvmsafe-example-erc20-full.rs"
+
 [dependencies]
 # Using pvmsafe_macros::contract directly rather than a `pvmsafe` facade
 # crate: simplest path to resolve the attribute in this scaffolding stage.
