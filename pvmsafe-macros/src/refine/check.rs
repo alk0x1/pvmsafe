@@ -21,7 +21,7 @@ pub fn check_module(module: &ItemMod, errors: &mut Vec<Error>) {
         return;
     };
 
-    let has_invariant = has_conservation_invariant(&module.attrs);
+    let groups = conservation_groups(&module.attrs);
 
     for item in items {
         if let Item::Fn(f) = item {
@@ -38,11 +38,13 @@ pub fn check_module(module: &ItemMod, errors: &mut Vec<Error>) {
 
     for item in items {
         let Item::Fn(f) = item else { continue };
-        check_fn(f, &methods, has_invariant, errors);
+        check_fn(f, &methods, groups.as_deref(), errors);
     }
 }
 
-fn has_conservation_invariant(attrs: &[Attribute]) -> bool {
+const DEFAULT_GROUP: &str = "_default";
+
+fn conservation_groups(attrs: &[Attribute]) -> Option<Vec<String>> {
     for attr in attrs {
         let segs: Vec<_> = attr.path().segments.iter().collect();
         let is_invariant = matches!(
@@ -56,11 +58,30 @@ fn has_conservation_invariant(attrs: &[Attribute]) -> bool {
         }
         if let Ok(id) = attr.parse_args::<syn::Ident>() {
             if id == "conserves" {
-                return true;
+                return Some(vec![DEFAULT_GROUP.to_string()]);
+            }
+        }
+        if let Ok(call) = attr.parse_args::<syn::ExprCall>() {
+            if let Expr::Path(ExprPath { path, .. }) = &*call.func {
+                if path.is_ident("conserves") {
+                    let mut names = Vec::new();
+                    for arg in &call.args {
+                        if let Expr::Path(ExprPath { path, .. }) = arg {
+                            if let Some(id) = path.get_ident() {
+                                names.push(id.to_string());
+                                continue;
+                            }
+                        }
+                        return None;
+                    }
+                    if !names.is_empty() {
+                        return Some(names);
+                    }
+                }
             }
         }
     }
-    false
+    None
 }
 
 fn is_entrypoint(f: &ItemFn) -> bool {
@@ -177,7 +198,7 @@ fn extract_refine(attrs: &[Attribute]) -> Option<Expr> {
 fn check_fn(
     f: &ItemFn,
     methods: &HashMap<String, MethodInfo>,
-    has_invariant: bool,
+    groups: Option<&[String]>,
     errors: &mut Vec<Error>,
 ) {
     let name = f.sig.ident.to_string();
@@ -198,10 +219,15 @@ fn check_fn(
 
     let ensures = info.and_then(|i| i.ensures.as_ref());
 
-    let delta_acc = if has_invariant && is_entrypoint(f) {
-        Some(LinearExpr::constant(0))
-    } else {
-        None
+    let delta_acc = match groups {
+        Some(names) if is_entrypoint(f) => {
+            let mut map = HashMap::new();
+            for n in names {
+                map.insert(n.clone(), LinearExpr::constant(0));
+            }
+            Some(map)
+        }
+        _ => None,
     };
     let track_conservation = delta_acc.is_some();
 
@@ -233,7 +259,7 @@ struct CallWalker<'a> {
     assumptions: Vec<Constraint>,
     ensures: Option<&'a Expr>,
     in_given: bool,
-    delta_acc: Option<LinearExpr>,
+    delta_acc: Option<HashMap<String, LinearExpr>>,
     errors: &'a mut Vec<Error>,
 }
 
@@ -356,7 +382,7 @@ impl<'ast, 'a> Visit<'ast> for CallWalker<'a> {
     }
 }
 
-fn extract_delta(e: &Expr) -> Option<Expr> {
+fn extract_delta(e: &Expr) -> Option<(String, Expr)> {
     let attrs: &[Attribute] = match e {
         Expr::Call(c) => &c.attrs,
         Expr::MethodCall(c) => &c.attrs,
@@ -378,7 +404,14 @@ fn extract_delta(e: &Expr) -> Option<Expr> {
             continue;
         }
         if let Ok(expr) = attr.parse_args::<Expr>() {
-            return Some(expr);
+            if let Expr::Assign(a) = &expr {
+                if let Expr::Path(ExprPath { path, .. }) = &*a.left {
+                    if let Some(id) = path.get_ident() {
+                        return Some((id.to_string(), (*a.right).clone()));
+                    }
+                }
+            }
+            return Some((DEFAULT_GROUP.to_string(), expr));
         }
     }
     None
@@ -448,15 +481,28 @@ fn local_ident(pat: &Pat) -> Option<String> {
 
 impl<'a> CallWalker<'a> {
     fn apply_delta(&mut self, e: &Expr) {
-        let Some(delta_expr) = extract_delta(e) else { return };
-        if self.delta_acc.is_none() {
+        let Some((group, delta_expr)) = extract_delta(e) else { return };
+        let Some(map) = self.delta_acc.as_mut() else { return };
+        if !map.contains_key(&group) {
+            let msg = if group == DEFAULT_GROUP {
+                "pvmsafe: bare `delta(expr)` requires `#[pvmsafe::invariant(conserves)]` \
+                 (no named groups); use `delta(name = expr)` with a declared group"
+                    .to_string()
+            } else {
+                format!(
+                    "pvmsafe: delta group `{group}` not declared in module invariant"
+                )
+            };
+            self.errors.push(Error::new(delta_expr.span(), msg));
             return;
         }
         match translate_term(&delta_expr) {
             Ok(lin) => {
-                let acc = self.delta_acc.as_ref().unwrap();
+                let acc = map.get(&group).unwrap();
                 match acc.add(&lin) {
-                    Some(updated) => self.delta_acc = Some(updated),
+                    Some(updated) => {
+                        map.insert(group, updated);
+                    }
                     None => self.errors.push(Error::new(
                         delta_expr.span(),
                         "pvmsafe: delta accumulation overflowed",
@@ -471,31 +517,40 @@ impl<'a> CallWalker<'a> {
     }
 
     fn check_conservation(&mut self, span: proc_macro2::Span) {
-        let Some(acc) = self.delta_acc.clone() else { return };
-        let Some(neg) = acc.neg() else {
-            self.errors.push(Error::new(
-                span,
-                "pvmsafe: conservation check overflow",
-            ));
-            return;
-        };
-        for goal_expr in [acc, neg] {
-            let goal = Constraint::new(goal_expr);
-            match fm::entails(&self.assumptions, &goal) {
-                Ok(true) => {}
-                Ok(false) => {
-                    self.errors.push(Error::new(
-                        span,
-                        "pvmsafe: conservation invariant violated; deltas do not sum to zero",
-                    ));
-                    return;
-                }
-                Err(FmError::Overflow) => {
-                    self.errors.push(Error::new(
-                        span,
-                        "pvmsafe: conservation check exceeded Fourier-Motzkin complexity bound",
-                    ));
-                    return;
+        let Some(map) = self.delta_acc.clone() else { return };
+        for (group, acc) in map {
+            let Some(neg) = acc.neg() else {
+                self.errors.push(Error::new(
+                    span,
+                    "pvmsafe: conservation check overflow",
+                ));
+                return;
+            };
+            for goal_expr in [acc, neg] {
+                let goal = Constraint::new(goal_expr);
+                match fm::entails(&self.assumptions, &goal) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let msg = if group == DEFAULT_GROUP {
+                            "pvmsafe: conservation invariant violated; \
+                             deltas do not sum to zero"
+                                .to_string()
+                        } else {
+                            format!(
+                                "pvmsafe: conservation invariant violated for group `{group}`; \
+                                 deltas do not sum to zero"
+                            )
+                        };
+                        self.errors.push(Error::new(span, msg));
+                        break;
+                    }
+                    Err(FmError::Overflow) => {
+                        self.errors.push(Error::new(
+                            span,
+                            "pvmsafe: conservation check exceeded Fourier-Motzkin complexity bound",
+                        ));
+                        break;
+                    }
                 }
             }
         }
@@ -2372,6 +2427,118 @@ mod tests {
         );
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("conservation"), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_named_group_balanced_accepted() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves(shares))]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn transfer(#[pvmsafe::refine(amount > 0)] amount: u64) {
+                    #[pvmsafe::delta(shares = -amount)]
+                    a(amount);
+                    #[pvmsafe::delta(shares = amount)]
+                    b(amount);
+                }
+                fn a(x: u64) {}
+                fn b(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_multiple_named_groups_independent() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves(shares, assets))]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn f(
+                    #[pvmsafe::refine(amount > 0)] amount: u64,
+                    #[pvmsafe::refine(n > 0)] n: u64,
+                ) {
+                    #[pvmsafe::delta(shares = -n)]
+                    a(n);
+                    #[pvmsafe::delta(shares = n)]
+                    b(n);
+                    #[pvmsafe::delta(assets = -amount)]
+                    c(amount);
+                    #[pvmsafe::delta(assets = amount)]
+                    d(amount);
+                }
+                fn a(x: u64) {}
+                fn b(x: u64) {}
+                fn c(x: u64) {}
+                fn d(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_one_group_unbalanced_rejected() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves(shares, assets))]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn f(#[pvmsafe::refine(n > 0)] n: u64) {
+                    #[pvmsafe::delta(shares = -n)]
+                    a(n);
+                    #[pvmsafe::delta(shares = n)]
+                    b(n);
+                    #[pvmsafe::delta(assets = n)]
+                    c(n);
+                }
+                fn a(x: u64) {}
+                fn b(x: u64) {}
+                fn c(x: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("assets"), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_unknown_group_rejected() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves(shares))]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn f(#[pvmsafe::refine(n > 0)] n: u64) {
+                    #[pvmsafe::delta(assets = n)]
+                    a(n);
+                }
+                fn a(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.iter().any(|e| e.contains("not declared")), "{errs:?}");
+    }
+
+    #[test]
+    fn conservation_bare_delta_rejected_when_named_groups() {
+        let errs = check(
+            r#"
+            #[pvmsafe::invariant(conserves(shares))]
+            mod m {
+                #[pvm_contract_macros::method]
+                pub fn f(#[pvmsafe::refine(n > 0)] n: u64) {
+                    #[pvmsafe::delta(-n)]
+                    a(n);
+                }
+                fn a(x: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.iter().any(|e| e.contains("bare")), "{errs:?}");
     }
 
     #[test]

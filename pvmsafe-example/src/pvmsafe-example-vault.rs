@@ -5,7 +5,7 @@ use pallet_revive_uapi::{HostFnImpl as api, StorageFlags};
 use ruint::aliases::U256;
 
 #[pvmsafe_macros::contract]
-#[pvmsafe::invariant(conserves)]
+#[pvmsafe::invariant(conserves(shares))]
 #[pvm_contract_macros::contract("Vault.sol", allocator = "pico")]
 mod vault {
     use super::*;
@@ -67,9 +67,9 @@ mod vault {
         #[pvmsafe::locally]
         {
             store_u256(&total_assets_key(), assets.saturating_add(amount));
-            #[pvmsafe::delta(-new_shares)]
+            #[pvmsafe::delta(shares = -new_shares)]
             store_u256(&total_shares_key(), supply.saturating_add(new_shares));
-            #[pvmsafe::delta(new_shares)]
+            #[pvmsafe::delta(shares = new_shares)]
             store_u256(&shares_key(&caller), user_shares.saturating_add(new_shares));
         }
 
@@ -107,9 +107,9 @@ mod vault {
 
         #[pvmsafe::locally]
         {
-            #[pvmsafe::delta(-shares)]
+            #[pvmsafe::delta(shares = -shares)]
             store_u256(&shares_key(&caller), new_user_shares);
-            #[pvmsafe::delta(shares)]
+            #[pvmsafe::delta(shares = shares)]
             store_u256(&total_shares_key(), supply.saturating_sub(shares));
             store_u256(&total_assets_key(), assets.saturating_sub(payout));
         }
