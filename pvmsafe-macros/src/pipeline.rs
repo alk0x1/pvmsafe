@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{ItemMod, parse_macro_input};
 
-use crate::{reentrancy, refine, strip};
+use crate::{effects, refine, strip};
 
 pub fn run(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut module = parse_macro_input!(item as ItemMod);
@@ -12,7 +12,7 @@ pub fn run(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 pub fn run_on_module(module: &mut ItemMod) -> TokenStream2 {
     let mut errors = Vec::new();
-    reentrancy::check_module(module, &mut errors);
+    effects::check::check_module(module, &mut errors);
     refine::check_module(module, &mut errors);
     strip::strip_pvmsafe_attrs(module);
 
@@ -31,7 +31,7 @@ mod tests {
     fn errors(src: &str) -> Vec<String> {
         let mut module: ItemMod = syn::parse_str(src).expect("parse");
         let mut errs = Vec::new();
-        reentrancy::check_module(&module, &mut errs);
+        effects::check::check_module(&module, &mut errs);
         refine::check_module(&module, &mut errs);
         strip::strip_pvmsafe_attrs(&mut module);
         errs.into_iter().map(|e| e.to_string()).collect()
@@ -45,13 +45,17 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_emits_reentrancy_error() {
+    fn pipeline_emits_cei_error() {
         let errs = errors(
             r#"
             mod m {
+                #[pvmsafe::effect(call)]
+                fn ext() {}
+                #[pvmsafe::effect(write)]
+                fn sink() {}
                 fn f() {
-                    #[pvmsafe::externally] { let _ = 1; }
-                    #[pvmsafe::locally] { let _ = 2; }
+                    ext();
+                    sink();
                 }
             }
             "#,
