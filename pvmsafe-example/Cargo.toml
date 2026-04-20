@@ -20,8 +20,16 @@ name = "pvmsafe-example-vault"
 path = "src/pvmsafe-example-vault.rs"
 
 [[bin]]
+name = "pvmsafe-example-vault-vulnerable"
+path = "src/pvmsafe-example-vault-vulnerable.rs"
+
+[[bin]]
 name = "pvmsafe-example-erc20-full"
 path = "src/pvmsafe-example-erc20-full.rs"
+
+[[bin]]
+name = "pvmsafe-example-erc20-vulnerable"
+path = "src/pvmsafe-example-erc20-vulnerable.rs"
 
 [dependencies]
 # Using pvmsafe_macros::contract directly rather than a `pvmsafe` facade

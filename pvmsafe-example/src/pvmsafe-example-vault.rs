@@ -47,6 +47,7 @@ mod vault {
     }
 
     #[pvm_contract_macros::method]
+    #[allow(unused_braces)]
     pub fn deposit(
         #[pvmsafe::refine(amount > 0)] amount: U256,
     ) -> Result<(), Error> {
@@ -75,6 +76,7 @@ mod vault {
     }
 
     #[pvm_contract_macros::method]
+    #[allow(unused_braces)]
     pub fn withdraw(
         #[pvmsafe::refine(shares > 0)] shares: U256,
     ) -> Result<(), Error> {
