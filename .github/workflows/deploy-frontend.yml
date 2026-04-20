@@ -1,0 +1,111 @@
+name: Deploy Frontend to DotNS
+
+on:
+  workflow_dispatch:
+    inputs:
+      basename:
+        description: 'DotNS basename (9+ letters followed by exactly 2 digits, e.g. pvmsafe-demo00)'
+        type: string
+        default: 'pvmsafe-demo00'
+      skip-cache:
+        description: 'Skip deployment cache and force redeploy'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  statuses: write
+  id-token: write
+  pull-requests: write
+
+concurrency:
+  group: deploy-frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    name: Check for changes
+    outputs:
+      source-hash: ${{ steps.source-hash.outputs.hash }}
+      cache-hit: ${{ steps.cache-check.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute source hash
+        id: source-hash
+        run: echo "hash=$(git ls-files demo/frontend/ .github/workflows/deploy-frontend.yml | xargs sha256sum | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Check deployment cache
+        id: cache-check
+        uses: actions/cache@v4
+        with:
+          path: .deployment-marker
+          key: deployment-${{ steps.source-hash.outputs.hash }}
+          lookup-only: true
+
+  build:
+    needs: check
+    if: needs.check.outputs.cache-hit != 'true' || inputs.skip-cache
+    runs-on: ubuntu-latest
+    name: Build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: demo/frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: demo/frontend
+        run: npm ci
+
+      - name: Cache build
+        id: cache-build
+        uses: actions/cache@v4
+        with:
+          path: demo/frontend/dist
+          key: build-${{ needs.check.outputs.source-hash }}
+
+      - name: Build app
+        if: steps.cache-build.outputs.cache-hit != 'true'
+        working-directory: demo/frontend
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: demo/frontend/dist
+          retention-days: 1
+
+  deploy:
+    needs: [check, build]
+    if: needs.check.outputs.cache-hit != 'true' || inputs.skip-cache
+    name: Deploy
+    uses: paritytech/dotns-sdk/.github/workflows/deploy.yml@main
+    with:
+      basename: ${{ inputs.basename }}
+      mode: production
+      artifact-name: frontend-build
+      register-base: true
+      skip-cache: ${{ inputs.skip-cache || false }}
+      max-retries: 3
+    secrets:
+      dotns-mnemonic: ${{ secrets.DOTNS_MNEMONIC || 'bottom drive obey lake curtain smoke basket hold race lonely fit walk' }}
+
+  post-deploy:
+    needs: [check, deploy]
+    if: needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    name: Mark as deployed
+    steps:
+      - name: Create deployment marker
+        run: echo "deployed" > .deployment-marker
+
+      - name: Cache deployment marker
+        uses: actions/cache/save@v4
+        with:
+          path: .deployment-marker
+          key: deployment-${{ needs.check.outputs.source-hash }}

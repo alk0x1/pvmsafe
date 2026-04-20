@@ -3,6 +3,9 @@ CLAUDE.md
 DESIGN.md
 TALK.md
 DECISIONS-TO-BE-MADE.md
-demo/
+demo/*
+!demo/frontend/
+demo/frontend/node_modules/
+demo/frontend/dist/
 documentation/
 pvmsafe-deploy/
