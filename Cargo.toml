@@ -7,4 +7,4 @@
 [workspace]
 resolver = "2"
 members = ["pvmsafe-macros"]
-exclude = ["pvmsafe-example"]
+exclude = ["pvmsafe-example", "pvmsafe-deploy", "demo/frontend", "demo/server"]
