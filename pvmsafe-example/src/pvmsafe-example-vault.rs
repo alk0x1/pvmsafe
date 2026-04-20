@@ -47,7 +47,6 @@ mod vault {
     }
 
     #[pvm_contract_macros::method]
-    #[allow(unused_braces)]
     pub fn deposit(
         #[pvmsafe::refine(amount > 0)] amount: U256,
     ) -> Result<(), Error> {
@@ -64,25 +63,18 @@ mod vault {
         let caller = get_caller();
         let user_shares = load_u256(&shares_key(&caller));
 
-        #[pvmsafe::locally]
-        {
-            store_u256(&total_assets_key(), assets.saturating_add(amount));
-            #[pvmsafe::delta(shares = -new_shares)]
-            store_u256(&total_shares_key(), supply.saturating_add(new_shares));
-            #[pvmsafe::delta(shares = new_shares)]
-            store_u256(&shares_key(&caller), user_shares.saturating_add(new_shares));
-        }
+        store_u256(&total_assets_key(), assets.saturating_add(amount));
+        #[pvmsafe::delta(shares = -new_shares)]
+        store_u256(&total_shares_key(), supply.saturating_add(new_shares));
+        #[pvmsafe::delta(shares = new_shares)]
+        store_u256(&shares_key(&caller), user_shares.saturating_add(new_shares));
 
-        #[pvmsafe::externally]
-        {
-            emit_deposit(&caller, amount, new_shares);
-        }
+        emit_deposit(&caller, amount, new_shares);
 
         Ok(())
     }
 
     #[pvm_contract_macros::method]
-    #[allow(unused_braces)]
     pub fn withdraw(
         #[pvmsafe::refine(shares > 0)] shares: U256,
     ) -> Result<(), Error> {
@@ -105,19 +97,13 @@ mod vault {
 
         let new_user_shares = user_shares - shares;
 
-        #[pvmsafe::locally]
-        {
-            #[pvmsafe::delta(shares = -shares)]
-            store_u256(&shares_key(&caller), new_user_shares);
-            #[pvmsafe::delta(shares = shares)]
-            store_u256(&total_shares_key(), supply.saturating_sub(shares));
-            store_u256(&total_assets_key(), assets.saturating_sub(payout));
-        }
+        #[pvmsafe::delta(shares = -shares)]
+        store_u256(&shares_key(&caller), new_user_shares);
+        #[pvmsafe::delta(shares = shares)]
+        store_u256(&total_shares_key(), supply.saturating_sub(shares));
+        store_u256(&total_assets_key(), assets.saturating_sub(payout));
 
-        #[pvmsafe::externally]
-        {
-            emit_withdraw(&caller, payout, shares);
-        }
+        emit_withdraw(&caller, payout, shares);
 
         Ok(())
     }
@@ -128,6 +114,7 @@ mod vault {
     }
 
     #[pvmsafe::ensures(v >= 0)]
+    #[pvmsafe::effect(read)]
     fn load_u256(key: &[u8; 32]) -> U256 {
         let mut bytes = vec![0u8; 32];
         let mut output = bytes.as_mut_slice();
@@ -137,6 +124,7 @@ mod vault {
         }
     }
 
+    #[pvmsafe::effect(write)]
     fn store_u256(key: &[u8; 32], value: U256) {
         api::set_storage(StorageFlags::empty(), key, &value.to_be_bytes::<32>());
     }
@@ -162,6 +150,7 @@ mod vault {
         key
     }
 
+    #[pvmsafe::effect(read)]
     fn get_caller() -> [u8; 20] {
         let mut caller = [0u8; 20];
         api::caller(&mut caller);
@@ -182,6 +171,7 @@ mod vault {
         0xf4, 0xa1, 0xb5, 0x56, 0xc4, 0x05, 0x24, 0x1a,
     ];
 
+    #[pvmsafe::effect(emit)]
     fn emit_deposit(user: &[u8; 20], amount: U256, shares: U256) {
         let mut user_topic = [0u8; 32];
         user_topic[12..32].copy_from_slice(user);
@@ -192,6 +182,7 @@ mod vault {
         api::deposit_event(&topics, &data);
     }
 
+    #[pvmsafe::effect(emit)]
     fn emit_withdraw(user: &[u8; 20], amount: U256, shares: U256) {
         let mut user_topic = [0u8; 32];
         user_topic[12..32].copy_from_slice(user);

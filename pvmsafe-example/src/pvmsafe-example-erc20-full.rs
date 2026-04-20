@@ -54,7 +54,6 @@ mod erc20_full {
     }
 
     #[pvm_contract_macros::method]
-    #[allow(unused_braces)]
     pub fn transfer(
         #[pvmsafe::unchecked] to: Address,
         #[pvmsafe::refine(amount > 0)] amount: U256,
@@ -74,24 +73,17 @@ mod erc20_full {
         let recipient_balance = load_u256(&balance_key(&to));
         let new_recipient_balance = recipient_balance.saturating_add(amount);
 
-        #[pvmsafe::locally]
-        {
-            #[pvmsafe::delta(-amount)]
-            store_u256(&balance_key(&caller), new_sender_balance);
-            #[pvmsafe::delta(amount)]
-            store_u256(&balance_key(&to), new_recipient_balance);
-        }
+        #[pvmsafe::delta(-amount)]
+        store_u256(&balance_key(&caller), new_sender_balance);
+        #[pvmsafe::delta(amount)]
+        store_u256(&balance_key(&to), new_recipient_balance);
 
-        #[pvmsafe::externally]
-        {
-            emit_transfer(&caller, &to, amount);
-        }
+        emit_transfer(&caller, &to, amount);
 
         Ok(())
     }
 
     #[pvm_contract_macros::method]
-    #[allow(unused_braces)]
     pub fn approve(
         #[pvmsafe::unchecked] spender: Address,
         #[pvmsafe::refine(amount >= 0)] amount: U256,
@@ -99,21 +91,14 @@ mod erc20_full {
         let caller = get_caller();
         let spender: [u8; 20] = spender.into();
 
-        #[pvmsafe::locally]
-        {
-            store_u256(&allowance_key(&caller, &spender), amount);
-        }
+        store_u256(&allowance_key(&caller, &spender), amount);
 
-        #[pvmsafe::externally]
-        {
-            emit_approval(&caller, &spender, amount);
-        }
+        emit_approval(&caller, &spender, amount);
 
         Ok(())
     }
 
     #[pvm_contract_macros::method]
-    #[allow(unused_braces)]
     pub fn transfer_from(
         #[pvmsafe::unchecked] from: Address,
         #[pvmsafe::unchecked] to: Address,
@@ -143,25 +128,18 @@ mod erc20_full {
         let to_balance = load_u256(&balance_key(&to_arr));
         let new_to_balance = to_balance.saturating_add(amount);
 
-        #[pvmsafe::locally]
-        {
-            store_u256(&allowance_key(&from_arr, &caller), new_allowance);
-            #[pvmsafe::delta(-amount)]
-            store_u256(&balance_key(&from_arr), new_from_balance);
-            #[pvmsafe::delta(amount)]
-            store_u256(&balance_key(&to_arr), new_to_balance);
-        }
+        store_u256(&allowance_key(&from_arr, &caller), new_allowance);
+        #[pvmsafe::delta(-amount)]
+        store_u256(&balance_key(&from_arr), new_from_balance);
+        #[pvmsafe::delta(amount)]
+        store_u256(&balance_key(&to_arr), new_to_balance);
 
-        #[pvmsafe::externally]
-        {
-            emit_transfer(&from_arr, &to_arr, amount);
-        }
+        emit_transfer(&from_arr, &to_arr, amount);
 
         Ok(())
     }
 
     #[pvm_contract_macros::method]
-    #[allow(unused_braces)]
     pub fn mint(
         #[pvmsafe::unchecked] to: Address,
         #[pvmsafe::refine(amount > 0)] amount: U256,
@@ -170,18 +148,12 @@ mod erc20_full {
         let new_recipient_balance = load_u256(&balance_key(&to_arr)).saturating_add(amount);
         let new_supply = load_u256(&total_supply_key()).saturating_add(amount);
 
-        #[pvmsafe::locally]
-        {
-            #[pvmsafe::delta(amount)]
-            store_u256(&balance_key(&to_arr), new_recipient_balance);
-            #[pvmsafe::delta(-amount)]
-            store_u256(&total_supply_key(), new_supply);
-        }
+        #[pvmsafe::delta(amount)]
+        store_u256(&balance_key(&to_arr), new_recipient_balance);
+        #[pvmsafe::delta(-amount)]
+        store_u256(&total_supply_key(), new_supply);
 
-        #[pvmsafe::externally]
-        {
-            emit_transfer(&[0u8; 20], &to_arr, amount);
-        }
+        emit_transfer(&[0u8; 20], &to_arr, amount);
 
         Ok(())
     }
@@ -191,6 +163,7 @@ mod erc20_full {
         Ok(())
     }
 
+    #[pvmsafe::effect(read)]
     fn load_u256(key: &[u8; 32]) -> U256 {
         let mut bytes = vec![0u8; 32];
         let mut output = bytes.as_mut_slice();
@@ -200,6 +173,7 @@ mod erc20_full {
         }
     }
 
+    #[pvmsafe::effect(write)]
     fn store_u256(key: &[u8; 32], value: U256) {
         api::set_storage(StorageFlags::empty(), key, &value.to_be_bytes::<32>());
     }
@@ -229,6 +203,7 @@ mod erc20_full {
         key
     }
 
+    #[pvmsafe::effect(read)]
     fn get_caller() -> [u8; 20] {
         let mut caller = [0u8; 20];
         api::caller(&mut caller);
@@ -247,6 +222,7 @@ mod erc20_full {
         0xe9, 0x25,
     ];
 
+    #[pvmsafe::effect(emit)]
     fn emit_transfer(from: &[u8; 20], to: &[u8; 20], value: U256) {
         let mut from_topic = [0u8; 32];
         from_topic[12..32].copy_from_slice(from);
@@ -259,6 +235,7 @@ mod erc20_full {
         api::deposit_event(&topics, &data);
     }
 
+    #[pvmsafe::effect(emit)]
     fn emit_approval(owner: &[u8; 20], spender: &[u8; 20], value: U256) {
         let mut owner_topic = [0u8; 32];
         owner_topic[12..32].copy_from_slice(owner);

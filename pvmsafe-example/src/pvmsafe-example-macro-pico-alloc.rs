@@ -76,18 +76,12 @@ mod my_token {
 
         let to: [u8; 20] = to.into();
 
-        #[pvmsafe::locally]
-        {
-            #[pvmsafe::delta(-amount)]
-            set_balance(&caller, new_sender_balance);
-            #[pvmsafe::delta(amount)]
-            set_balance(&to, new_recipient_balance);
-        }
+        #[pvmsafe::delta(-amount)]
+        set_balance(&caller, new_sender_balance);
+        #[pvmsafe::delta(amount)]
+        set_balance(&to, new_recipient_balance);
 
-        #[pvmsafe::externally]
-        {
-            emit_transfer(&caller, &to, amount);
-        }
+        emit_transfer(&caller, &to, amount);
 
         Ok(())
     }
@@ -102,18 +96,12 @@ mod my_token {
 
         let to: [u8; 20] = to.into();
 
-        #[pvmsafe::locally]
-        {
-            #[pvmsafe::delta(amount)]
-            set_balance(&to, new_recipient_balance);
-            #[pvmsafe::delta(-amount)]
-            set_total_supply(new_supply);
-        }
+        #[pvmsafe::delta(amount)]
+        set_balance(&to, new_recipient_balance);
+        #[pvmsafe::delta(-amount)]
+        set_total_supply(new_supply);
 
-        #[pvmsafe::externally]
-        {
-            emit_transfer(&[0u8; 20], &to, amount);
-        }
+        emit_transfer(&[0u8; 20], &to, amount);
 
         Ok(())
     }
@@ -137,15 +125,19 @@ mod my_token {
         key
     }
 
+    #[pvmsafe::effect(write)]
     fn set_total_supply(amount: U256) {
         let key = total_supply_key();
         api::set_storage(StorageFlags::empty(), &key, &amount.to_be_bytes::<32>());
     }
 
+    #[pvmsafe::effect(write)]
     fn set_balance(addr: &[u8; 20], amount: U256) {
         let key = balance_key(addr);
         api::set_storage(StorageFlags::empty(), &key, &amount.to_be_bytes::<32>());
     }
+
+    #[pvmsafe::effect(read)]
     fn get_caller() -> [u8; 20] {
         let mut caller = [0u8; 20];
         api::caller(&mut caller);
@@ -158,6 +150,7 @@ mod my_token {
         0xb3, 0xef,
     ];
 
+    #[pvmsafe::effect(emit)]
     fn emit_transfer(from: &[u8; 20], to: &[u8; 20], value: U256) {
         let mut from_topic = [0u8; 32];
         from_topic[12..32].copy_from_slice(from);
