@@ -4,7 +4,7 @@
 use pallet_revive_uapi::{HostFnImpl as api, StorageFlags};
 use ruint::aliases::U256;
 
-#[pvmsafe_macros::contract]
+#[pvmsafe::contract]
 #[pvmsafe::invariant(conserves(shares))]
 #[pvm_contract_macros::contract("Vault.sol", allocator = "pico")]
 mod vault {

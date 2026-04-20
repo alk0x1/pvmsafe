@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "pvmsafe-macros"
+name = "pvmsafe"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",

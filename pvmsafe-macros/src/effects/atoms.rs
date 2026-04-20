@@ -172,9 +172,7 @@ fn is_pvmsafe_path(path: &Path, name: &str) -> bool {
     let segs: Vec<_> = path.segments.iter().collect();
     matches!(
         segs.as_slice(),
-        [ns, n]
-            if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
-                && n.ident == name
+        [ns, n] if ns.ident == "pvmsafe" && n.ident == name
     )
 }
 
@@ -241,13 +239,6 @@ mod tests {
     fn missing_attribute_returns_none() {
         let attrs = fn_attrs("fn f() {}");
         assert!(extract_effect_decl(&attrs).unwrap().is_none());
-    }
-
-    #[test]
-    fn pvmsafe_macros_prefix_is_accepted() {
-        let attrs = fn_attrs("#[pvmsafe_macros::effect(write)] fn f() {}");
-        let set = extract_effect_decl(&attrs).unwrap().unwrap();
-        assert!(set.contains(Effect::Write));
     }
 
     #[test]

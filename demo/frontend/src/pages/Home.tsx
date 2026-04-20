@@ -15,7 +15,7 @@ mod erc20 {
 }`;
 
 const SAFE_CODE = `// ✓ verified — cargo build rejects unguarded subtraction
-#[pvmsafe_macros::contract]
+#[pvmsafe::contract]
 mod erc20 {
     pub fn transfer(
         #[pvmsafe::refine(amount > 0)] amount: U256,

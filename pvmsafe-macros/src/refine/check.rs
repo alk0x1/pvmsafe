@@ -50,7 +50,7 @@ fn conservation_groups(attrs: &[Attribute]) -> Option<Vec<String>> {
         let is_invariant = matches!(
             segs.as_slice(),
             [ns, name]
-                if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+                if ns.ident == "pvmsafe"
                     && name.ident == "invariant"
         );
         if !is_invariant {
@@ -105,7 +105,7 @@ fn is_pvmsafe_unchecked(attr: &Attribute) -> bool {
     matches!(
         segs.as_slice(),
         [ns, name]
-            if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+            if ns.ident == "pvmsafe"
                 && name.ident == "unchecked"
     )
 }
@@ -158,7 +158,7 @@ fn extract_ensures(attrs: &[Attribute]) -> Option<Expr> {
         let is_ensures = matches!(
             segs.as_slice(),
             [ns, name]
-                if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+                if ns.ident == "pvmsafe"
                     && name.ident == "ensures"
         );
         if !is_ensures {
@@ -184,7 +184,7 @@ fn extract_refine(attrs: &[Attribute]) -> Option<Expr> {
         let is_refine = matches!(
             segs.as_slice(),
             [ns, name]
-                if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+                if ns.ident == "pvmsafe"
                     && name.ident == "refine"
         );
         if !is_refine {
@@ -401,7 +401,7 @@ fn extract_delta(e: &Expr) -> Option<(String, Expr)> {
         let is_delta = matches!(
             segs.as_slice(),
             [ns, name]
-                if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+                if ns.ident == "pvmsafe"
                     && name.ident == "delta"
         );
         if !is_delta {
@@ -436,7 +436,7 @@ fn extract_given(e: &Expr) -> Vec<Constraint> {
         let is_given = matches!(
             segs.as_slice(),
             [ns, name]
-                if (ns.ident == "pvmsafe" || ns.ident == "pvmsafe_macros")
+                if ns.ident == "pvmsafe"
                     && name.ident == "given"
         );
         if !is_given {

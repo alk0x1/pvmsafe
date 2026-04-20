@@ -55,7 +55,7 @@ mod erc20_vulnerable {
         let new_sender_balance = sender_balance - amount;
         let to: [u8; 20] = to.into();
         let recipient_balance = load_u256(&balance_key(&to));
-        let new_recipient_balance = recipient_balance + amount;
+        let new_recipient_balance = recipient_balance.saturating_add(amount);
 
         store_u256(&balance_key(&caller), new_sender_balance);
         store_u256(&balance_key(&to), new_recipient_balance);
@@ -88,7 +88,7 @@ mod erc20_vulnerable {
         let new_from_balance = from_balance - amount;
         let to_arr: [u8; 20] = to.into();
         let to_balance = load_u256(&balance_key(&to_arr));
-        let new_to_balance = to_balance + amount;
+        let new_to_balance = to_balance.saturating_add(amount);
 
         store_u256(&allowance_key(&from_arr, &caller), new_allowance);
         store_u256(&balance_key(&from_arr), new_from_balance);
@@ -102,8 +102,8 @@ mod erc20_vulnerable {
     #[pvm_contract_macros::method]
     pub fn mint(to: Address, amount: U256) -> Result<(), Error> {
         let to_arr: [u8; 20] = to.into();
-        let new_recipient_balance = load_u256(&balance_key(&to_arr)) + amount;
-        let new_supply = load_u256(&total_supply_key()) + amount;
+        let new_recipient_balance = load_u256(&balance_key(&to_arr)).saturating_add(amount);
+        let new_supply = load_u256(&total_supply_key()).saturating_add(amount);
 
         store_u256(&balance_key(&to_arr), new_recipient_balance);
         store_u256(&total_supply_key(), new_supply);

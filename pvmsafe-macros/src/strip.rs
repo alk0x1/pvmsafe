@@ -61,6 +61,6 @@ fn is_pvmsafe(attr: &Attribute) -> bool {
     attr.path()
         .segments
         .first()
-        .map(|s| s.ident == "pvmsafe" || s.ident == "pvmsafe_macros")
+        .map(|s| s.ident == "pvmsafe")
         .unwrap_or(false)
 }

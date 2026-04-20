@@ -1,7 +1,7 @@
 # Standalone package: empty [workspace] detaches from the outer pvmsafe
 # workspace (see ../Cargo.toml for the rationale). Mirrors
 # cargo-pvm-contract/examples/example-mytoken exactly except for the added
-# pvmsafe-macros dependency and the single bin.
+# pvmsafe dependency and the single bin.
 [workspace]
 
 [package]
@@ -32,13 +32,11 @@ name = "pvmsafe-example-erc20-vulnerable"
 path = "src/pvmsafe-example-erc20-vulnerable.rs"
 
 [dependencies]
-# Using pvmsafe_macros::contract directly rather than a `pvmsafe` facade
-# crate: simplest path to resolve the attribute in this scaffolding stage.
 # Git deps instead of crates.io: only `cargo-pvm-contract` and
 # `cargo-pvm-contract-builder` are actually published; the rest live only in
 # the paritytech/cargo-pvm-contract repo. Pinned to a known-good rev so users
 # of pvmsafe don't need to clone anything manually.
-pvmsafe-macros = { path = "../pvmsafe-macros" }
+pvmsafe = { path = "../pvmsafe-macros" }
 pvm-contract-macros = { git = "https://github.com/paritytech/cargo-pvm-contract", rev = "586425cae76f10af61a84070bf657296194ab4c0" }
 pvm-contract-types = { git = "https://github.com/paritytech/cargo-pvm-contract", rev = "586425cae76f10af61a84070bf657296194ab4c0" }
 pvm-contract-builder-dsl = { git = "https://github.com/paritytech/cargo-pvm-contract", rev = "586425cae76f10af61a84070bf657296194ab4c0" }

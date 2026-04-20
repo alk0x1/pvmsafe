@@ -205,7 +205,7 @@ mod vault {
     //  ⚠ a malicious caller re-enters withdraw()
     //     before this line runs and drains the pool
 }`,
-      safe: `#[pvmsafe_macros::contract]
+      safe: `#[pvmsafe::contract]
 mod pool {
     #[pvmsafe::effect(read)]
     fn load(k: &[u8; 32]) -> U256 { /* ... */ }

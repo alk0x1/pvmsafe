@@ -700,6 +700,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pvmsafe"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "pvmsafe-example"
 version = "0.1.0"
 dependencies = [
@@ -712,17 +721,8 @@ dependencies = [
  "pvm-contract-builder-dsl",
  "pvm-contract-macros",
  "pvm-contract-types",
- "pvmsafe-macros",
+ "pvmsafe",
  "ruint",
-]
-
-[[package]]
-name = "pvmsafe-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]

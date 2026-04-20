@@ -165,30 +165,26 @@ export function Docs() {
         <section id="install">
           <h2>Install</h2>
           <p>
-            Add <code>pvmsafe-macros</code> alongside the pallet-revive contract
+            Add <code>pvmsafe</code> alongside the pallet-revive contract
             macros in your contract crate's <code>Cargo.toml</code>:
           </p>
           <Code
             lang="toml"
             code={`[dependencies]
 pvm-contract-macros = { git = "https://github.com/paritytech/cargo-pvm-contract" }
-pvmsafe-macros = { path = "../pvmsafe-macros" }`}
+pvmsafe = "0.1"`}
           />
-          <p className="docs-note">
-            pvmsafe is not yet published on crates.io. Use a path or git
-            dependency until the API stabilizes.
-          </p>
         </section>
 
         <section id="quickstart">
           <h2>Quick start</h2>
           <p>
-            Wrap your contract module with <code>#[pvmsafe_macros::contract]</code>{" "}
+            Wrap your contract module with <code>#[pvmsafe::contract]</code>{" "}
             (as the outer attribute) and the existing{" "}
             <code>#[pvm_contract_macros::contract(...)]</code> underneath:
           </p>
           <Code
-            code={`#[pvmsafe_macros::contract]
+            code={`#[pvmsafe::contract]
 #[pvmsafe::invariant(conserves)]
 #[pvm_contract_macros::contract("ERC20.sol", allocator = "pico")]
 mod erc20 {
@@ -224,13 +220,13 @@ mod erc20 {
           <h2>Attributes</h2>
           <p>
             Nine attributes drive the checker. All live under the{" "}
-            <code>pvmsafe::</code> prefix (with the exception of the outer{" "}
-            <code>pvmsafe_macros::contract</code>) and are stripped from the
+            <code>pvmsafe::</code> prefix, including the outer{" "}
+            <code>pvmsafe::contract</code>, and are stripped from the
             expansion before the inner contract macro runs.
           </p>
 
           <h3 id="attr-contract">
-            <code>#[pvmsafe_macros::contract]</code>
+            <code>#[pvmsafe::contract]</code>
           </h3>
           <p>
             Module-level. The entry point — enables all checks on the wrapped

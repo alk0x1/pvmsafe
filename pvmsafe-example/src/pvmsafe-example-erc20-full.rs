@@ -4,7 +4,7 @@
 use pallet_revive_uapi::{HostFnImpl as api, StorageFlags};
 use ruint::aliases::U256;
 
-#[pvmsafe_macros::contract]
+#[pvmsafe::contract]
 #[pvmsafe::invariant(conserves)]
 #[pvm_contract_macros::contract("ERC20Full.sol", allocator = "pico")]
 mod erc20_full {
@@ -65,10 +65,7 @@ mod erc20_full {
             return Err(Error::InsufficientBalance);
         }
 
-        #[pvmsafe::refine(v >= amount)]
-        let safe_balance = sender_balance;
-
-        let new_sender_balance = safe_balance - amount;
+        let new_sender_balance = sender_balance - amount;
         let to: [u8; 20] = to.into();
         let recipient_balance = load_u256(&balance_key(&to));
         let new_recipient_balance = recipient_balance.saturating_add(amount);
@@ -117,13 +114,8 @@ mod erc20_full {
             return Err(Error::InsufficientBalance);
         }
 
-        #[pvmsafe::refine(v >= amount)]
-        let safe_allowance = current_allowance;
-        #[pvmsafe::refine(v >= amount)]
-        let safe_balance = from_balance;
-
-        let new_allowance = safe_allowance - amount;
-        let new_from_balance = safe_balance - amount;
+        let new_allowance = current_allowance - amount;
+        let new_from_balance = from_balance - amount;
         let to_arr: [u8; 20] = to.into();
         let to_balance = load_u256(&balance_key(&to_arr));
         let new_to_balance = to_balance.saturating_add(amount);
