@@ -90,7 +90,9 @@ fn is_entrypoint(f: &ItemFn) -> bool {
         matches!(
             segs.as_slice(),
             [ns, name]
-                if ns.ident == "pvm_contract_macros"
+                if (ns.ident == "pvm"
+                    || ns.ident == "pvm_contract"
+                    || ns.ident == "pvm_contract_macros")
                     && (name.ident == "method"
                         || name.ident == "constructor"
                         || name.ident == "fallback")
@@ -982,6 +984,76 @@ mod tests {
         assert!(errs[0].contains("`transfer`"), "{errs:?}");
         assert!(errs[0].contains("pvmsafe::refine"), "{errs:?}");
         assert!(errs[0].contains("pvmsafe::unchecked"), "{errs:?}");
+    }
+
+    #[test]
+    fn short_prefix_method_is_recognized_as_entrypoint() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvm::method]
+                pub fn transfer(amount: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("`amount`"), "{errs:?}");
+        assert!(errs[0].contains("`transfer`"), "{errs:?}");
+    }
+
+    #[test]
+    fn medium_prefix_method_is_recognized_as_entrypoint() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvm_contract::method]
+                pub fn transfer(amount: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("`amount`"), "{errs:?}");
+    }
+
+    #[test]
+    fn short_prefix_constructor_is_recognized_as_entrypoint() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvm::constructor]
+                pub fn new(supply: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("`supply`"), "{errs:?}");
+    }
+
+    #[test]
+    fn short_prefix_fallback_is_recognized_as_entrypoint() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvm::fallback]
+                pub fn fallback(raw: u64) {}
+            }
+            "#,
+        );
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("`raw`"), "{errs:?}");
+    }
+
+    #[test]
+    fn short_prefix_with_refine_is_ok() {
+        let errs = check(
+            r#"
+            mod m {
+                #[pvm::method]
+                pub fn transfer(#[pvmsafe::refine(amount > 0)] amount: u64) {}
+            }
+            "#,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
     }
 
     #[test]
