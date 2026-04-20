@@ -1,5 +1,6 @@
 use proc_macro::TokenStream;
 
+mod effects;
 mod pipeline;
 mod reentrancy;
 mod refine;
