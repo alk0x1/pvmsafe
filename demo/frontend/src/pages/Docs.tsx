@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { Highlight, themes } from "prism-react-renderer";
 
 type Section = {
@@ -111,6 +112,11 @@ function flattenIds(toc: Section[]): string[] {
 export function Docs() {
   const active = useActiveHeading(flattenIds(TOC));
 
+  const scrollTo = (id: string) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   return (
     <div className="docs">
       <aside className="docs-toc">
@@ -120,6 +126,7 @@ export function Docs() {
               <li key={s.id}>
                 <a
                   href={`#${s.id}`}
+                  onClick={scrollTo(s.id)}
                   className={active === s.id ? "active" : ""}
                 >
                   {s.title}
@@ -130,6 +137,7 @@ export function Docs() {
                       <li key={c.id}>
                         <a
                           href={`#${c.id}`}
+                          onClick={scrollTo(c.id)}
                           className={active === c.id ? "active" : ""}
                         >
                           {c.title}
@@ -557,7 +565,7 @@ mod m {
           </ul>
           <p>
             The two verified/vulnerable pairs (erc20 and vault) drive the{" "}
-            <a href="/demo">live demo</a>.
+            <Link to="/demo">live demo</Link>.
           </p>
         </section>
       </main>
